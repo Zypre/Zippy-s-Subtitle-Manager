@@ -103,6 +103,8 @@ def build_ass(
     )
 
     lines = [header, ""]
+    top_events = [_with_breaks(e, top, layout) for e in top_events]
+    bot_events = [_with_breaks(e, bot, layout) for e in bot_events]
     if layout.auto_lift:
         top_events, bot_events = _position(top_events, bot_events, top, bot, layout)
 
@@ -157,23 +159,165 @@ def _position(
 
 
 def visual_lines(ev: Event, style: SideStyle, layout: Layout) -> int:
-    """How many lines a cue will occupy on screen, wrapping included.
+    """How many rows a cue will occupy on screen, wrapping included."""
+    return len(wrap_rows(ev.text, style, layout))
 
-    Counting `\\N` alone misses the commonest case: one long line that the
-    renderer wraps by itself. The width is estimated, not measured -- a
-    full-width (CJK) glyph is one em, anything else about half -- which is
-    close enough to know whether a line fits.
-    """
-    avail = max(1, layout.play_res_x - SIDE_MARGINS)
+
+# --------------------------------------------------------------------------
+# Line wrapping, as the renderer does it
+#
+# libass (mpv, VLC) and VSFilter wrap only at spaces by default. Chinese and
+# Japanese have none, so a long line of either does not wrap at all: it runs
+# off both edges of the screen. libass 0.17 can break such text properly,
+# but only when the player switches that on, and by default it is off.
+#
+# So the script makes the decision itself. A run of text with no space in it
+# that is wider than the frame gets explicit \N breaks, at evenly spaced
+# points and preferably after punctuation; everything else is left for the
+# renderer to wrap at its spaces. The same model then answers "how many rows
+# will this take" for the lift and for the window's preview, so all three
+# agree. Widths are estimated, not measured: a full-width glyph is one em,
+# anything else about half.
+# --------------------------------------------------------------------------
+
+_TOKEN_RE = re.compile(r"\{[^}]*\}|\\[Nnh]|.", re.DOTALL)
+
+#: A break reads best just after these.
+BREAK_AFTER = frozenset("，。！？、；：…—,.!?;:")
+#: And a row should never start with these.
+NO_ROW_START = frozenset("，。！？、；：」』）】》〉”’,.!?;:)]")
+
+#: Breaks inserted into an over-wide run aim this far short of the full
+#: width, leaving room to move a break onto nearby punctuation.
+BREAK_SLACK = 0.92
+
+
+def _glyph_width(token: str, style: SideStyle) -> float:
+    if token.startswith("{"):
+        return 0.0
     em = style.size * style.scale_x / 100
-    total = 0
-    for segment in _TAGS_RE.sub("", ev.text).replace(r"\h", " ").split(r"\N"):
-        width = 0.0
-        for ch in segment:
-            wide = unicodedata.east_asian_width(ch) in ("W", "F")
-            width += em * (1.0 if wide else NARROW_EM) + style.spacing
-        total += max(1, math.ceil(width / avail))
-    return total
+    ch = " " if token == r"\h" else token
+    wide = unicodedata.east_asian_width(ch) in ("W", "F")
+    return em * (1.0 if wide else NARROW_EM) + style.spacing
+
+
+def text_width(text: str, style: SideStyle) -> float:
+    """Estimated width of one row of plain or tagged text, in script pixels."""
+    return sum(_glyph_width(t, style) for t in _TOKEN_RE.findall(text)
+               if t not in (r"\N", r"\n"))
+
+
+def _available(layout: Layout) -> int:
+    return max(1, layout.play_res_x - SIDE_MARGINS)
+
+
+def break_long_words(text: str, style: SideStyle, layout: Layout) -> str:
+    """Insert \\N into any space-free run too wide for the frame.
+
+    Tags and escapes are kept intact; only the gaps between visible
+    characters ever receive a break.
+    """
+    avail = _available(layout)
+    out: list[str] = []
+    word: list[str] = []
+
+    def flush() -> None:
+        out.extend(_split_word(word, style, avail))
+        word.clear()
+
+    for token in _TOKEN_RE.findall(text):
+        if token in (" ", r"\N", r"\n"):
+            flush()
+            out.append(token)
+        else:
+            word.append(token)
+    flush()
+    return "".join(out)
+
+
+def _split_word(tokens: list[str], style: SideStyle, avail: float) -> list[str]:
+    visible = [i for i, t in enumerate(tokens) if not t.startswith("{")]
+    widths = [_glyph_width(tokens[i], style) for i in visible]
+    total = sum(widths)
+    if total <= avail or len(visible) < 2:
+        return list(tokens)
+    rows = math.ceil(total / (avail * BREAK_SLACK))
+    target = total / rows
+    ends = []                                     # width up to and including k
+    for width in widths:
+        ends.append((ends[-1] if ends else 0.0) + width)
+
+    breaks: set[int] = set()
+    start = 0.0                                   # width before the current row
+    last = len(visible) - 1                       # never break after the end
+    for b in range(1, rows):
+        ideal = target * b
+        fits = [k for k in range(last) if start < ends[k] <= start + avail]
+        if not fits:
+            break
+        near = [k for k in fits if abs(ends[k] - ideal) <= target / 4]
+        punct = [k for k in near if tokens[visible[k]] in BREAK_AFTER]
+        pos = min(punct or near or fits, key=lambda k: abs(ends[k] - ideal))
+        while (pos + 1 < last and tokens[visible[pos + 1]] in NO_ROW_START
+               and ends[pos + 1] <= start + avail):
+            pos += 1                              # never start a row on 。
+        breaks.add(visible[pos])
+        start = ends[pos]
+    out: list[str] = []
+    for i, token in enumerate(tokens):
+        out.append(token)
+        if i in breaks:
+            out.append(r"\N")
+    return out
+
+
+def wrap_rows(text: str, style: SideStyle, layout: Layout) -> list[str]:
+    """The rows a cue will appear as, tags removed, top row first.
+
+    Explicit breaks first (ours included), then the renderer's own wrapping
+    at spaces, evened out the way "smart" wrapping evens it.
+    """
+    avail = _available(layout)
+    plain = _TAGS_RE.sub("", break_long_words(text, style, layout))
+    rows: list[str] = []
+    for segment in plain.replace(r"\h", " ").replace(r"\n", " ").split(r"\N"):
+        rows += _wrap_segment(segment, style, avail)
+    return rows
+
+
+def _wrap_segment(segment: str, style: SideStyle, avail: float) -> list[str]:
+    words = segment.split(" ")
+    space = _glyph_width(" ", style)
+    widths = [text_width(w, style) for w in words]
+
+    def fill(limit: float) -> list[list[int]]:
+        rows: list[list[int]] = [[]]
+        used = 0.0
+        for i, width in enumerate(widths):
+            extra = width + (space if rows[-1] else 0)
+            if rows[-1] and used + extra > limit:
+                rows.append([])
+                used, extra = 0.0, width
+            rows[-1].append(i)
+            used += extra
+        return rows
+
+    greedy = fill(avail)
+    if len(greedy) > 1:
+        # Smart wrapping keeps the row count but evens the rows out.
+        even = fill(sum(widths) / len(greedy) + space * len(words) / len(greedy))
+        if len(even) == len(greedy):
+            greedy = even
+    return [" ".join(words[i] for i in row) for row in greedy]
+
+
+def _with_breaks(ev: Event, style: SideStyle, layout: Layout) -> Event:
+    """Break over-wide space-free runs; positioned signs keep their layout."""
+    if ev.has_positional_override:
+        return ev
+    from dataclasses import replace
+    text = break_long_words(ev.text, style, layout)
+    return ev if text == ev.text else replace(ev, text=text)
 
 
 def _with_pos(ev: Event, x: int, y: int) -> Event:

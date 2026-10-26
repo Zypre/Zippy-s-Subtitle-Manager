@@ -155,6 +155,31 @@ def test_sidecar_mode_puts_default_flags_on_the_original():
         assert [t.name for t in media.tracks if t.default] == ["Dialogue (Simplified)"]
 
 
+def test_every_text_track_comes_out_of_one_read():
+    from dualsubs import worst
+    with tempfile.TemporaryDirectory() as tmp:
+        video = _season(Path(tmp))
+        media = probe.probe(video, TOOLS)
+        text = worst.read_file_text(media, TOOLS)
+        assert not text.problem
+        assert sorted(text.tracks) == sorted(t.id for t in media.tracks)
+        chinese = next(t.id for t in media.tracks if t.raw_language == "chi")
+        assert text.tracks[chinese][0][2] == CHS[0]
+        assert text.stamp == worst.file_stamp(video)
+        # Asked to stop before it starts, it gives up rather than half-reading.
+        assert worst.read_file_text(media, TOOLS, should_stop=lambda: True) is None
+
+
+def test_a_cancelled_child_process_is_killed():
+    import time
+    from dualsubs.tools import run_cancellable
+    started = time.time()
+    stop_at = started + 0.3
+    result = run_cancellable([sys.executable, "-c", "import time; time.sleep(30)"],
+                             lambda: time.time() > stop_at)
+    assert result is None and time.time() - started < 5
+
+
 # --------------------------------------------------------------------------
 
 if __name__ == "__main__":

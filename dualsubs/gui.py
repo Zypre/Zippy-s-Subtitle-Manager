@@ -36,7 +36,7 @@ from tkinter import BooleanVar, StringVar, Tk, colorchooser, filedialog, message
 import tkinter as tk
 import tkinter.font as tkfont
 
-from . import __version__, langs, probe, survey as survey_mod
+from . import __version__, langs, probe, render, survey as survey_mod, worst
 from .config import Config
 from .pipeline import SideSpec, choose_source, collect_videos, process
 from .probe import ProbeError
@@ -72,14 +72,15 @@ FONT_FALLBACKS = ["Arial", "Segoe UI", "Tahoma", "Verdana",
                   "Microsoft YaHei", "SimHei", "SimSun", "KaiTi",
                   "Noto Sans CJK SC", "Source Han Sans SC"]
 
-#: Shown in the appearance preview, keyed by language. One line, then two.
+#: Shown in the appearance preview, keyed by language, until the queued
+#: files have been read and the real worst moment can be shown instead.
 SAMPLES = {
-    "chi": ("你要去哪儿？", "你要去哪儿？\n带把伞吧，会下雨的。"),
-    "eng": ("Where are you going?", "Where are you going?\nTake an umbrella, it will rain."),
-    "jpn": ("どこへ行くの？", "どこへ行くの？\n傘を持って行きなさい。"),
-    "kor": ("어디 가?", "어디 가?\n우산 가져가, 비 올 거야."),
+    "chi": "你要去哪儿？",
+    "eng": "Where are you going?",
+    "jpn": "どこへ行くの？",
+    "kor": "어디 가?",
 }
-GENERIC_SAMPLE = ("Sample subtitle line", "Sample subtitle line\nwith a second line")
+GENERIC_SAMPLE = "Sample subtitle line"
 
 #: Per-side appearance fields that travel with a language when the two
 #: lines are swapped. Margin is positional, so it stays where it is.
@@ -182,6 +183,17 @@ class App:
         self.track_boxes: dict[str, list] = {"audio": [], "subtitle": [],
                                              "subtitle_embedded": []}
         self.ratio_cache: dict[str, float] = {}
+        #: Each queued video's subtitle text, read once in the background.
+        self.texts: dict[Path, worst.FileText] = {}
+        #: Subtitle files on disk, which are cheap to read; keyed by path.
+        self.sub_texts: dict[Path, tuple] = {}
+        self.text_thread: threading.Thread | None = None
+        self.text_stop = threading.Event()
+        self.text_progress = (0, 0)
+        #: The moment the preview shows, and the bookkeeping to find it.
+        self.worst: worst.Moment | None = None
+        self.worst_generation = 0
+        self.worst_job = None
 
         root.title(TITLE)
         root.minsize(760, 560)
@@ -194,7 +206,8 @@ class App:
         self._find_tools()
         self._accept_dropped_arguments()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
-        root.after(80, self._drain)
+        root.bind("<Destroy>", self._on_destroy, add="+")
+        self.drain_job = root.after(80, self._drain)
         if self.cfg_problem:
             self.write(f"could not read the settings file, using defaults: "
                        f"{self.cfg_problem}\n", "error")
@@ -400,6 +413,7 @@ class App:
                           "language keeps its font, size and colour.")
             self.vars[f"{side}_language"].trace_add("write", self._schedule_plan)
             self.vars[f"{side}_language"].trace_add("write", self._schedule_preview)
+            self.vars[f"{side}_language"].trace_add("write", self._schedule_worst)
 
         out = ttk.LabelFrame(tab, text="Output", padding=(PAD, 4))
         out.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(PAD, 0))
@@ -492,7 +506,7 @@ class App:
                         ).grid(row=r, column=9, padx=(0, 6))
 
         self.vars["layout.auto_lift"] = BooleanVar()
-        self.vars["preview_two_lines"] = BooleanVar(value=False)
+        self.vars["preview_worst"] = BooleanVar(value=True)
         row = ttk.Frame(tab)
         row.grid(row=3, column=0, columnspan=12, sticky="w", pady=(6, 4))
         tip(ttk.Checkbutton(row, text="lift the top line over a bottom line "
@@ -500,17 +514,29 @@ class App:
                             variable=self.vars["layout.auto_lift"]),
             "When the bottom subtitle wraps or has two lines, the top one is "
             "raised by a row for that moment so the two never overlap.").pack(side="left")
-        ttk.Checkbutton(row, text="preview with a two-row bottom line",
-                        variable=self.vars["preview_two_lines"]
-                        ).pack(side="left", padx=(PAD * 2, 0))
+        tip(ttk.Checkbutton(row, text="preview the worst moment in the queued files",
+                            variable=self.vars["preview_worst"]),
+            "Show the moment where the most rows of text are on screen at "
+            "once, taken from the files themselves. Each file is read once, "
+            "in the background, when it is added; changing languages or "
+            "fonts afterwards costs nothing.").pack(side="left", padx=(PAD * 2, 0))
 
-        self.preview = tk.Canvas(tab, height=150, highlightthickness=0,
-                                 background="#33465a")
+        self.preview = tk.Canvas(tab, height=170, highlightthickness=0,
+                                 background="#1e2a36")
         self.preview.grid(row=4, column=0, columnspan=12, sticky="ew")
         self.preview.bind("<Configure>", lambda e: self._schedule_preview())
+        self.preview_caption = StringVar()
+        ttk.Label(tab, textvariable=self.preview_caption, style="Hint.TLabel"
+                  ).grid(row=5, column=0, columnspan=12, sticky="w", pady=(2, 0))
+        #: Settings that change how many rows a line takes, so which moment
+        #: is the worst -- as opposed to colour or margin, which only move it.
+        wrapping = {"top.size", "top.scale_x", "top.spacing", "bottom.size",
+                    "bottom.scale_x", "bottom.spacing", "preview_worst"}
         for name, var in self.vars.items():
             if name.startswith(("top.", "bottom.", "layout.", "preview_")):
                 var.trace_add("write", self._schedule_preview)
+            if name in wrapping:
+                var.trace_add("write", self._schedule_worst)
         return tab
 
     def _tab_timing(self, parent) -> ttk.Frame:
@@ -702,7 +728,7 @@ class App:
             self.vars[f"{side}.outline"].set(_num_text(style.outline))
         gui = c.gui or {}
         self.vars["recursive"].set(bool(gui.get("recursive", False)))
-        self.vars["preview_two_lines"].set(bool(gui.get("preview_two_lines", False)))
+        self.vars["preview_worst"].set(bool(gui.get("preview_worst", True)))
         self._paint_swatches()
 
     def _collect_settings(self) -> None:
@@ -739,7 +765,7 @@ class App:
             style.outline = _float(self.vars[f"{side}.outline"], style.outline, 0, 10)
         c.gui = dict(c.gui or {},
                      recursive=self.vars["recursive"].get(),
-                     preview_two_lines=self.vars["preview_two_lines"].get(),
+                     preview_worst=self.vars["preview_worst"].get(),
                      geometry=self.root.geometry())
 
     def save_settings(self, announce: bool = True) -> bool:
@@ -774,7 +800,21 @@ class App:
                     "A file being written right now may be left incomplete."):
                 return
         self.save_settings(announce=False)
+        self._pause_text_scan()           # or mkvextract outlives the window
         self.root.destroy()
+
+    def _on_destroy(self, event) -> None:
+        """Cancel pending timers, which would otherwise fire into a window
+        that no longer exists."""
+        if event.widget is not self.root:
+            return
+        self.text_stop.set()
+        for job in (self.drain_job, self.plan_job, self.worst_job, self.preview_job):
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
 
     def _bind_keys(self) -> None:
         r = self.root
@@ -876,7 +916,10 @@ class App:
             for child, text in zip(children, shown):
                 self.tree.item(child, text=text)
             self.tree.item(iid, values=("", "", f"{len(children)} file(s)"))
+        queued = set(self.videos)
+        self.texts = {v: t for v, t in self.texts.items() if v in queued}
         self._schedule_plan()
+        self._schedule_worst()
 
     def _selected_videos(self) -> list[Path]:
         chosen: list[Path] = []
@@ -1139,18 +1182,48 @@ class App:
                             + (f", {problems} unreadable" if problems else ""))
                         for problem in result.failed[:5]:
                             self.write(f"  ! {problem}\n", "error")
+                        self._ensure_text_scan()
+                        self._schedule_worst()
                 elif kind == "renamed":
                     mapping = payload
                     self.videos = [mapping.get(v, v) for v in self.videos]
+                    # A rename keeps size and modification time, so the text
+                    # already read is still good under the new name.
+                    for old, new in mapping.items():
+                        if old in self.texts:
+                            self.texts[new] = self.texts.pop(old)
                     self._refresh_tree()
                     self._rescan()
                 elif kind == "job_done":
                     self.worker = None
                     self.progress["value"] = 0
                     self._update_states()
+                    self._ensure_text_scan()
+                elif kind == "text_progress":
+                    self.text_progress = payload
+                    self._update_caption()
+                elif kind == "text_done":
+                    path, text = payload
+                    if path in self.videos:
+                        self.texts[path] = text
+                        if text.problem:
+                            self.write(f"  ! preview could not read {path.name}: "
+                                       f"{text.problem}\n", "dim")
+                    self._schedule_worst()
+                elif kind == "text_scan_end":
+                    self.text_thread = None
+                    self.text_progress = (0, 0)
+                    self._ensure_text_scan()      # anything queued meanwhile
+                    self._update_caption()
+                elif kind == "worst":
+                    generation, moment = payload
+                    if generation == self.worst_generation:
+                        self.worst = moment
+                        self._update_caption()
+                        self._schedule_preview()
         except queue.Empty:
             pass
-        self.root.after(80, self._drain)
+        self.drain_job = self.root.after(80, self._drain)
 
     def _post(self, text: str, tag: str | None = None) -> None:
         self.messages.put(("log", (text, tag)))
@@ -1162,6 +1235,7 @@ class App:
         if self.worker and self.worker.is_alive():
             self.status.set(f"{self.job_name} is still running")
             return False
+        self._pause_text_scan()
         self.stop_event.clear()
         self.job_name = name
 
@@ -1178,6 +1252,160 @@ class App:
         self.worker.start()
         self._update_states()
         return True
+
+    # ------------------------------------------- reading text for the preview
+
+    def _ensure_text_scan(self) -> None:
+        """Read the text of any queued file that has not been read yet.
+
+        One pass per file, for all its text tracks at once, so this happens
+        once when a file is added and never again for that file -- unless it
+        changes on disk. It gives way to every job: a job stops it (killing
+        the read in progress), and it picks up where it left off afterwards.
+        """
+        if self.tools is None or (self.text_thread and self.text_thread.is_alive()):
+            return
+        if self.worker and self.worker.is_alive():
+            return
+        todo = [self.survey.media[v] for v in self.videos
+                if v in self.survey.media and not self._text_is_current(v)]
+        if not todo:
+            return
+        self.text_stop.clear()
+        tools, stop = self.tools, self.text_stop
+
+        def work() -> None:
+            try:
+                for i, media in enumerate(todo):
+                    if stop.is_set():
+                        break
+                    self.messages.put(("text_progress", (i, len(todo))))
+                    text = worst.read_file_text(media, tools, stop.is_set)
+                    if text is None:              # stopped part way
+                        break
+                    self.messages.put(("text_done", (media.path, text)))
+            except Exception:
+                self._post(traceback.format_exc(), "error")
+            finally:
+                self.messages.put(("text_scan_end", None))
+
+        self.text_thread = threading.Thread(target=work, daemon=True)
+        self.text_thread.start()
+        self._update_caption()
+
+    def _text_is_current(self, video: Path) -> bool:
+        text = self.texts.get(video)
+        return text is not None and text.stamp == worst.file_stamp(video)
+
+    def _pause_text_scan(self) -> None:
+        """Stop reading so a job has the files to itself (Windows will not
+        rename a file another process has open)."""
+        thread = self.text_thread
+        if thread and thread.is_alive():
+            self.text_stop.set()
+            thread.join(timeout=10)
+
+    # ------------------------------------------------ the worst moment, found
+
+    def _schedule_worst(self, *_) -> None:
+        if self.worst_job is not None:
+            self.root.after_cancel(self.worst_job)
+        self.worst_job = self.root.after(300, self._update_worst)
+
+    def _update_worst(self) -> None:
+        """Find the worst moment across the queue, off the UI thread.
+
+        Pure arithmetic on text already in memory, plus reading any subtitle
+        files on disk the first time they are needed.
+        """
+        self.worst_job = None
+        self.worst_generation += 1
+        generation = self.worst_generation
+        if not self.vars["preview_worst"].get():
+            self.worst = None
+            self._update_caption()
+            self._schedule_preview()
+            return
+        top = SideSpec.parse(survey_mod.spec_of(self.vars["top_language"].get()))
+        bottom = SideSpec.parse(survey_mod.spec_of(self.vars["bottom_language"].get()))
+        styles = (self._side_style("top"), self._side_style("bottom"), self._layout())
+        entries = [(v, self.survey.media.get(v), self.texts.get(v)) for v in self.videos]
+
+        def sources():
+            for video, media, text in entries:
+                if media is None or text is None:
+                    continue
+                t = choose_source(media, top)
+                b = choose_source(media, bottom, {t.file} if t.file else set())
+                yield video, self._cues(t, text), self._cues(b, text)
+
+        def work() -> None:
+            try:
+                moment = worst.worst_across(
+                    sources(), *styles,
+                    should_stop=lambda: self.worst_generation != generation)
+            except Exception:
+                self._post(traceback.format_exc(), "error")
+                moment = None
+            self.messages.put(("worst", (generation, moment)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cues(self, choice, text) -> list:
+        if choice.track is not None:
+            return text.tracks.get(choice.track.id, [])
+        if choice.file is not None:
+            stamp = worst.file_stamp(choice.file)
+            cached = self.sub_texts.get(choice.file)
+            if cached is None or cached[0] != stamp:
+                try:
+                    cached = (stamp, worst.read_subtitle_file(choice.file))
+                except (OSError, ValueError):
+                    cached = (stamp, [])
+                self.sub_texts[choice.file] = cached
+            return cached[1]
+        return []
+
+    def _side_style(self, side: str) -> render.SideStyle:
+        v = self.vars
+        return render.SideStyle(
+            font=v[f"{side}.font"].get().strip() or "Arial",
+            size=_int(v[f"{side}.size"], 52, 6, 400),
+            margin_v=_int(v[f"{side}.margin_v"], 50, 0, 1000),
+            spacing=_int(v[f"{side}.spacing"], 0, -50, 50),
+            scale_x=_int(v[f"{side}.scale_x"], 100, 20, 400),
+            bold=v[f"{side}.bold"].get(),
+            italic=v[f"{side}.italic"].get(),
+            primary=v[f"{side}.primary"].get(),
+            outline=_float(v[f"{side}.outline"], 2, 0, 10))
+
+    def _layout(self) -> render.Layout:
+        c = self.cfg.layout
+        return render.Layout(play_res_x=c.play_res_x, play_res_y=c.play_res_y,
+                             auto_lift=self.vars["layout.auto_lift"].get(),
+                             line_height_factor=c.line_height_factor)
+
+    def _update_caption(self) -> None:
+        done, total = self.text_progress
+        reading = (f"reading subtitles for the preview: {done + 1} of {total} "
+                   f"file(s)" if total else "")
+        moment = self.worst if self.vars["preview_worst"].get() else None
+        if moment is not None:
+            where = (self.tree.item(str(moment.video), "text")
+                     if moment.video and self.tree.exists(str(moment.video))
+                     else getattr(moment.video, "name", ""))
+            text = (f"Worst moment{' so far' if reading else ''}: {where} at "
+                    f"{moment.when()} — {moment.top_rows} row(s) on top, "
+                    f"{moment.bottom_rows} below")
+        elif not self.vars["preview_worst"].get():
+            text = "Sample text."
+        elif reading:
+            text = "Sample text for now."
+        elif self.videos and self.texts:
+            text = "Sample text: none of the queued files has text for these lines."
+        else:
+            text = "Sample text. Queue videos to preview the worst moment in them."
+        self.preview_caption.set(text + (f"   ({reading})" if reading else ""))
 
     def run_or_stop(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -1607,76 +1835,91 @@ class App:
         self.preview_job = self.root.after(60, self._draw_preview)
 
     def _draw_preview(self) -> None:
-        """The bottom of a 1080p frame, drawn with the current settings.
+        """The frame, drawn with the current settings.
+
+        Rows break exactly where the written script will break them, and the
+        top line is lifted by exactly what the script will lift it by -- the
+        same functions decide both. The view takes in as much of the frame as
+        the stack needs, shrinking to fit when a worst case climbs high.
 
         Tk cannot stretch glyphs or space letters, so Width % and Spacing are
-        not shown; position, size, font, colour and the lift are.
+        not drawn; position, size, font, colour, wrapping and lift are.
         """
         self.preview_job = None
         canvas = self.preview
         canvas.delete("all")
-        width = canvas.winfo_width()
-        height = canvas.winfo_height()
-        if width < 50:
+        cw, ch = canvas.winfo_width(), canvas.winfo_height()
+        if cw < 50:
             return
-        frame_w, frame_h = 1920, 1080
-        scale = width / frame_w
-        top_y0 = frame_h - height / scale          # frame row at the canvas top
-        canvas.create_text(8, 6, anchor="nw", fill="#9fb1c4",
-                           text="preview: bottom of the frame", font=("TkDefaultFont", 8))
+        layout = self._layout()
+        fw, fh = layout.play_res_x, layout.play_res_y
+        top, bottom = self._side_style("top"), self._side_style("bottom")
 
-        two_rows = self.vars["preview_two_lines"].get()
-        styles = {side: self._preview_style(side) for side in ("top", "bottom")}
-        bottom_text = _sample(self.vars["bottom_language"].get(), two_rows)
-        rows = bottom_text.count("\n") + 1
+        moment = self.worst if self.vars["preview_worst"].get() else None
+        if moment is not None:
+            top_text, bottom_text = moment.top, moment.bottom
+        else:
+            top_text = _sample(self.vars["top_language"].get())
+            bottom_text = _sample(self.vars["bottom_language"].get())
+        top_rows = render.wrap_rows(top_text, top, layout) if top_text else []
+        bottom_rows = render.wrap_rows(bottom_text, bottom, layout) if bottom_text else []
+
+        # Placement, as render._position does it.
+        y_bottom = fh - bottom.margin_v
         lift = 0
-        if self.vars["layout.auto_lift"].get() and rows > 1:
-            lift = (rows - 1) * styles["bottom"]["size"] * 1.2
-        for side, text, extra in (("bottom", bottom_text, 0),
-                                  ("top", _sample(self.vars["top_language"].get(), False),
-                                   lift)):
-            st = styles[side]
-            y = (frame_h - st["margin"] - extra - top_y0) * scale
-            font = self._preview_font(st, scale)
-            outline = max(1, round(st["outline"] * scale)) if st["outline"] > 0 else 0
+        if layout.auto_lift and len(bottom_rows) > 1:
+            lift = (len(bottom_rows) - 1) * round(bottom.size * layout.line_height_factor)
+        y_top = fh - top.margin_v - lift
+        highest = min([fh]
+                      + ([y_top - len(top_rows) * top.size] if top_rows else [])
+                      + ([y_bottom - len(bottom_rows) * bottom.size] if bottom_rows else []))
+        visible = min(fh, max(fh * 0.3, fh - highest + 40))
+        scale = min(cw / fw, ch / visible)
+        x0 = (cw - fw * scale) / 2
+
+        def at(frame_y: float) -> float:
+            return ch - (fh - frame_y) * scale
+
+        canvas.create_rectangle(x0, max(0, at(0)), x0 + fw * scale, ch,
+                                fill="#33465a", width=0)
+        whole = visible >= fh or at(0) >= 0
+        canvas.create_text(x0 + 6, max(0, at(0)) + 4, anchor="nw", fill="#9fb1c4",
+                           font=("TkDefaultFont", 8),
+                           text=f"{fw}×{fh} frame" if whole
+                           else f"bottom of a {fw}×{fh} frame")
+
+        for rows, style, y in ((bottom_rows, bottom, y_bottom), (top_rows, top, y_top)):
+            if not rows:
+                continue
+            text = "\n".join(rows)
+            font = self._preview_font(style, scale)
+            colour = _ass_to_hex(style.primary) or "#ffffff"
+            outline = max(1, round(style.outline * scale)) if style.outline > 0 else 0
             for dx in range(-outline, outline + 1):
                 for dy in range(-outline, outline + 1):
                     if (dx or dy) and abs(dx) + abs(dy) <= outline + 1:
-                        canvas.create_text(width / 2 + dx, y + dy, text=text,
+                        canvas.create_text(cw / 2 + dx, at(y) + dy, text=text,
                                            font=font, fill="black", anchor="s",
-                                           justify="center",
-                                           width=(frame_w - 20) * scale)
-            canvas.create_text(width / 2, y, text=text, font=font, fill=st["colour"],
-                               anchor="s", justify="center",
-                               width=(frame_w - 20) * scale)
+                                           justify="center")
+            canvas.create_text(cw / 2, at(y), text=text, font=font, fill=colour,
+                               anchor="s", justify="center")
+        self._update_caption()
 
-    def _preview_style(self, side: str) -> dict:
-        v = self.vars
-        return {
-            "font": v[f"{side}.font"].get().strip() or "Arial",
-            "size": _int(v[f"{side}.size"], 52, 6, 400),
-            "margin": _int(v[f"{side}.margin_v"], 50, 0, 1000),
-            "bold": v[f"{side}.bold"].get(),
-            "italic": v[f"{side}.italic"].get(),
-            "colour": _ass_to_hex(v[f"{side}.primary"].get()) or "#ffffff",
-            "outline": _float(v[f"{side}.outline"], 2, 0, 10),
-        }
-
-    def _preview_font(self, st: dict, scale: float) -> tuple:
+    def _preview_font(self, style: render.SideStyle, scale: float) -> tuple:
         """A Tk font whose line height matches the ASS size.
 
         ASS sizes a font by its full line height; Tk by its em. The ratio
         differs per typeface, so it is measured once per family.
         """
-        family = st["font"]
+        family = style.font
         ratio = self.ratio_cache.get(family)
         if ratio is None:
             probe_font = tkfont.Font(family=family, size=-100)
             ratio = max(0.5, probe_font.metrics("linespace") / 100)
             self.ratio_cache[family] = ratio
-        pixels = max(4, round(st["size"] * scale / ratio))
-        styles = [s for s, on in (("bold", st["bold"]), ("italic", st["italic"])) if on]
-        return (family, -pixels, *styles)
+        pixels = max(4, round(style.size * scale / ratio))
+        flags = [s for s, on in (("bold", style.bold), ("italic", style.italic)) if on]
+        return (family, -pixels, *flags)
 
 
 # ------------------------------------------------------------------ helpers
@@ -1726,11 +1969,10 @@ def _enable(widget, on: bool) -> None:
         pass
 
 
-def _sample(spec_entry: str, two_rows: bool) -> str:
+def _sample(spec_entry: str) -> str:
     spec = survey_mod.spec_of(spec_entry)
     language = langs.normalize(spec.split(":")[0]) if spec and not spec.startswith("#") else None
-    one, two = SAMPLES.get(language or "", GENERIC_SAMPLE)
-    return two if two_rows else one
+    return SAMPLES.get(language or "", GENERIC_SAMPLE)
 
 
 def _int(var: tk.Variable, fallback: int, low: int, high: int) -> int:

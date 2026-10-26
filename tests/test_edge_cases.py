@@ -290,6 +290,89 @@ def test_a_missing_track_is_explained_accurately():
     assert choose_source(media, SideSpec.parse("chi")).track.id == 3
 
 
+# ------------------------------------------------------------ wrapping (2.2)
+
+ZH = render.SideStyle(font="Microsoft YaHei", size=70)
+EN = render.SideStyle(font="Arial", size=52)
+LONG_ZH = ("所以我跟他说，如果你真的想让我踢假球，那你得多付钱，"
+           "不然我是不会答应你的，因为这样对我们都不好。")
+LONG_EN = ("So I said to him, look, if you really want me to throw the match "
+           "then you are going to have to pay a lot more")
+
+
+def test_an_over_wide_chinese_line_is_broken_at_punctuation():
+    # Renderers wrap only at spaces by default, so this used to run off both
+    # edges of the screen. Checked against libass 0.17.
+    layout = render.Layout()
+    rows = render.wrap_rows(LONG_ZH, ZH, layout)
+    assert rows == ["所以我跟他说，如果你真的想让我踢假球，那你得多付钱，",
+                    "不然我是不会答应你的，因为这样对我们都不好。"]
+    assert all(render.text_width(r, ZH) <= 1900 for r in rows)
+
+
+def test_breaks_never_start_a_row_on_punctuation_or_split_tags():
+    layout = render.Layout()
+    text = r"{\i1}" + "中" * 25 + "。」" + "文" * 20 + r"{\i0}"
+    broken = render.break_long_words(text, ZH, layout)
+    assert broken.startswith(r"{\i1}") and broken.endswith(r"{\i0}")
+    for row in broken.split(r"\N")[1:]:
+        assert row[0] not in render.NO_ROW_START
+    assert render.break_long_words("中" * 26, ZH, layout) == "中" * 26   # it fits
+
+
+def test_the_script_carries_the_breaks_but_signs_keep_their_layout():
+    top = [Event(0, 100, LONG_ZH),
+           Event(0, 100, r"{\an8\pos(960,50)}" + "招牌" * 30)]
+    script = render.build_ass(top, [], ZH, EN)
+    dialogue = [l for l in script.splitlines() if l.startswith("Dialogue:")]
+    assert r"付钱，\N不然" in dialogue[0] or r"付钱，\N不然" in dialogue[1]
+    sign = next(l for l in dialogue if "招牌" in l)
+    assert r"\N" not in sign
+
+
+def test_english_wraps_at_spaces_into_even_rows():
+    rows = render.wrap_rows(LONG_EN, EN, render.Layout())
+    assert len(rows) == 2 and " ".join(rows) == LONG_EN
+    widths = [render.text_width(r, EN) for r in rows]
+    assert max(widths) - min(widths) < 200          # evened out, not greedy
+
+
+# ------------------------------------------------------- worst moment (2.2)
+
+from dualsubs import worst
+
+
+def test_the_worst_moment_is_the_tallest_stack_on_screen():
+    top = [(0, 100, "短"), (200, 300, LONG_ZH), (400, 500, "这句很长但是没有那么长")]
+    bottom = [(0, 100, "Short."), (210, 290, LONG_EN), (600, 700, LONG_EN)]
+    moment = worst.worst_moment(top, bottom, ZH, EN, render.Layout())
+    assert (moment.top, moment.bottom) == (LONG_ZH, LONG_EN)
+    assert (moment.top_rows, moment.bottom_rows, moment.start) == (2, 2, 210)
+    assert moment.when() == "0:00:02"
+
+
+def test_a_lone_line_still_counts_and_width_breaks_ties():
+    bottom = [(0, 100, "one\\Ntwo\\Nthree")]
+    moment = worst.worst_moment([], bottom, ZH, EN, render.Layout())
+    assert moment.rows == 3 and moment.top == ""
+    tie = worst.worst_moment([(0, 10, "a"), (20, 30, "abcdef")], [], ZH, EN,
+                             render.Layout())
+    assert tie.top == "abcdef"
+
+
+def test_the_worst_across_files_names_its_file():
+    files = [(Path("e1.mkv"), [(0, 100, "短")], [(0, 100, "Short.")]),
+             (Path("e2.mkv"), [(0, 100, LONG_ZH)], [(0, 100, "Short.")])]
+    moment = worst.worst_across(files, ZH, EN, render.Layout())
+    assert moment.video == Path("e2.mkv")
+
+
+def test_compact_keeps_dialogue_and_drops_placed_signs():
+    events = [Event(50, 90, r"{\i1}Hello{\i0}\Nthere"),
+              Event(0, 40, r"{\an8}SIGN"), Event(10, 20, r"{\b1}  ")]
+    assert worst.compact(events) == [(50, 90, r"Hello\Nthere")]
+
+
 # --------------------------------------------------------------------------
 
 if __name__ == "__main__":

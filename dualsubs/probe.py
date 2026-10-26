@@ -186,6 +186,42 @@ def extract_events(media: MediaInfo, track: Track, tools: Toolset,
     )
 
 
+def extract_texts(media: MediaInfo, tracks: list[Track], tools: Toolset,
+                  workdir: Path, should_stop=None) -> dict[int, list[Event]] | None:
+    """Every requested text track, in one pass over the file.
+
+    Pulling one subtitle track out of a Matroska file means reading the whole
+    file, since its blocks are spread through every cluster -- but mkvextract
+    writes as many tracks as it is asked for during that one read. So asking
+    for all of them costs the same as asking for one. Image-based tracks are
+    skipped: they carry pictures, not text.
+
+    Returns None if `should_stop()` interrupted it. A track that would not
+    parse comes back as an empty list rather than failing the rest.
+    """
+    from .tools import run_cancellable
+
+    wanted = [t for t in tracks if not t.is_image]
+    if not wanted:
+        return {}
+    targets = {t.id: workdir / f"text{t.id}.sub_out" for t in wanted}
+    cmd = [str(tools.mkvextract), str(media.path), "tracks",
+           *(f"{tid}:{path}" for tid, path in targets.items())]
+    res = run_cancellable(cmd, should_stop or (lambda: False))
+    if res is None:
+        return None
+    if res.returncode not in (0, 1):
+        raise ProbeError(f"mkvextract could not read {media.path.name}: "
+                         f"{(res.stderr or res.stdout).strip()[:300]}")
+    out: dict[int, list[Event]] = {}
+    for tid, path in targets.items():
+        try:
+            out[tid] = load_events(path) if path.exists() else []
+        except (OSError, ValueError):
+            out[tid] = []
+    return out
+
+
 def track_onsets_ms(media: MediaInfo, track: Track, tools: Toolset,
                     workdir: Path) -> list[float]:
     """Cue start times for a track, in ms. Works for image tracks too."""

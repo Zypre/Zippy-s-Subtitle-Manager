@@ -3,7 +3,7 @@ Claude made this. Therefore nobody made this. Use it as you will.
 
 ---
 
-# dual_subs 2.1.0
+# dual_subs 2.2.0
 
 Puts two subtitle languages on screen at once, as one styled ASS track — one
 line on top, one on the bottom. Each side is resolved independently: an
@@ -109,7 +109,14 @@ The tabs:
   contain, or type a spec; `...` chooses one particular file), **Swap**, the
   output mode, and traditional → simplified conversion.
 - **Appearance** — font, size, margin, spacing, width, bold, italic, colour
-  and outline per line, with a live preview of the bottom of a 1080p frame.
+  and outline per line, with a live preview. The preview shows **the worst
+  moment in the queued files**: the instant with the most rows of text on
+  screen at once, top and bottom combined, with the file and time it comes
+  from. Each file's subtitle text is read once, in the background, when the
+  file is added — every text track in a single pass, since reading one
+  embedded track means reading the whole video anyway. Changing languages
+  or fonts afterwards only redoes the arithmetic. Any job (a run, a rename)
+  pauses the reading and it carries on afterwards.
 - **Timing** — retiming files from disk, and how the two lines are kept in
   step. Settings that do not apply to the chosen mode are greyed out.
 - **Default tracks** — which audio and subtitle track a player starts with.
@@ -121,6 +128,30 @@ button on the toolbar) has Inspect, Set default tracks, Shorten file names,
 **Undo last rename**, Convert subtitle files to UTF-8 and Locate MKVToolNix.
 Shortcuts: Ctrl+O add files, Ctrl+Shift+O add folder, Delete remove, Ctrl+I
 inspect, Ctrl+S save settings, Ctrl+Enter run.
+
+## Long lines
+
+Players wrap a subtitle line only at spaces by default — libass (mpv, VLC)
+and VSFilter alike. Chinese and Japanese have no spaces, so a line of either
+that is wider than the screen does not wrap at all: it runs off both edges.
+libass 0.17 can break such text properly, but only if the player turns that
+on, and it is off by default.
+
+So the script decides instead. Any run of text with no space in it that is
+too wide for the frame gets explicit line breaks, at evenly spaced points,
+preferably just after punctuation (，。！？), and never so that a row starts
+with closing punctuation:
+
+```
+所以我跟他说，如果你真的想让我踢假球，那你得多付钱，
+不然我是不会答应你的，因为这样对我们都不好。
+```
+
+Everything else is left for the player to wrap at its spaces. The same model
+of where rows break decides how far the top line is lifted over a tall bottom
+line, and draws the window's preview, so all three agree. Positioned signs
+keep their authored layout. Widths are estimated (a full-width glyph is one
+em, anything else about half), erring wide.
 
 ## Output modes
 
@@ -527,7 +558,8 @@ Not carried over: nothing intentionally. The `!`-in-filename workaround the
 dualsubs\
   langs.py       language codes and aliases
   formats.py     SRT / ASS / VTT / MicroDVD -> Event
-  render.py      Event -> styled ASS, including the anti-collision positioning
+  render.py      Event -> styled ASS, line breaking and the anti-collision positioning
+  worst.py       the worst moment in the queue, for the preview
   sync.py        offset + framerate estimation
   discover.py    matching loose subtitle files to a video
   probe.py       mkvmerge -J, track extraction, muxing
