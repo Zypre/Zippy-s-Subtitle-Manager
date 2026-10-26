@@ -157,6 +157,39 @@ def test_distinct_parts_keeps_what_tells_files_apart():
     assert gui._distinct_parts(["only.mkv"]) == ["only.mkv"]
 
 
+def test_the_preview_finds_the_worst_moment_in_the_queue():
+    import subprocess
+    import time
+    with _Window() as app, tempfile.TemporaryDirectory() as tmp:
+        if app.tools is None:
+            return                                # needs MKVToolNix
+        folder = Path(tmp)
+
+        def srt(name, lines):
+            def ts(cs):
+                return f"00:00:{cs // 100:02},{cs % 100 * 10:03}"
+            (folder / name).write_text("\n".join(
+                f"{i}\n{ts(s)} --> {ts(e)}\n{t}\n"
+                for i, (s, e, t) in enumerate(lines, 1)), encoding="utf-8")
+
+        srt("a.srt", [(100, 300, "短"), (400, 900, "这句话很长" * 8 + "。")])
+        srt("b.srt", [(100, 300, "Short."), (450, 850, "A longer line. " * 3)])
+        subprocess.run([str(app.tools.mkvmerge), "-q", "-o", str(folder / "Ep.mkv"),
+                        "--language", "0:chi", str(folder / "a.srt"),
+                        "--language", "0:eng", str(folder / "b.srt")], check=False)
+        app.vars["top_language"].set("chi")
+        app.vars["bottom_language"].set("eng")
+        app._add([folder])
+        end = time.time() + 20
+        while time.time() < end and app.worst is None:
+            app.root.update()
+            time.sleep(0.05)
+        assert app.worst is not None, app.preview_caption.get()
+        assert app.worst.top.startswith("这句话很长") and app.worst.top_rows == 2
+        assert app.worst.video == folder / "Ep.mkv" or app.worst.video.name == "Ep.mkv"
+        assert "Worst moment" in app.preview_caption.get()
+
+
 # --------------------------------------------------------------------------
 
 if __name__ == "__main__":

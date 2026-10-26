@@ -124,15 +124,40 @@ def _which(name: str) -> Path | None:
     return Path(found).resolve() if found else None
 
 
-def run(cmd: list[str], timeout: int = 3600) -> subprocess.CompletedProcess:
-    """Run a child process without flashing a console window on Windows."""
+def _quiet() -> dict:
+    """Keyword arguments that stop a child flashing a console on Windows."""
     kwargs: dict = {}
     if WINDOWS:
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         kwargs["startupinfo"] = si
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return kwargs
+
+
+def run(cmd: list[str], timeout: int = 3600) -> subprocess.CompletedProcess:
+    """Run a child process without flashing a console window on Windows."""
     return subprocess.run(
         cmd, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=timeout, **kwargs,
+        errors="replace", timeout=timeout, **_quiet(),
     )
+
+
+def run_cancellable(cmd: list[str], should_stop) -> subprocess.CompletedProcess | None:
+    """Like run(), but polls `should_stop()` and kills the child when it says so.
+
+    Returns None if it was stopped. For long reads in the background that a
+    job touching the same file has to interrupt -- on Windows a file another
+    process has open cannot be renamed.
+    """
+    import time
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", **_quiet())
+    while proc.poll() is None:
+        if should_stop():
+            proc.kill()
+            proc.communicate()
+            return None
+        time.sleep(0.1)
+    out, err = proc.communicate()
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)

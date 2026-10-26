@@ -10,6 +10,47 @@ To cut a release: bump `__version__`, add a section below, commit, then tag it
 `v<version>` (for example `v2.1.0`) and attach the zip to a GitHub release of
 the same name.
 
+## 2.2.0 — 2026-10-26
+
+### The window
+
+- **The appearance preview shows the worst moment in the queued files**:
+  the instant with the most rows of text on screen, top and bottom combined
+  (wider text wins a tie), drawn with your fonts and settings. A caption
+  names the file and time, so you can find it in the video. Until the files
+  have been read it shows sample text, as before.
+- Each file is read once, when it is added, in the background. Every text
+  track comes out of that one pass: extracting one embedded track means
+  reading the whole video, and mkvextract writes all the tracks it is asked
+  for during that single read (measured: 3 tracks plus timestamps from a
+  360 MB file read exactly 360 MB). Changing languages, fonts or sizes
+  afterwards only recalculates.
+- Any job (a run, a rename, setting flags...) stops the reading at once —
+  the read in progress is killed, since Windows will not rename a file
+  another program has open — and it carries on afterwards. Closing the
+  window stops it too.
+- The preview frames as much of the screen as the stack needs, and draws
+  rows broken exactly where the script will break them.
+- The "preview with a two-row bottom line" option is gone; the worst case
+  replaces it. "Preview the worst moment" can be switched off.
+
+### Output
+
+- **Long Chinese and Japanese lines no longer run off the screen.** Players
+  wrap only at spaces by default, so a space-free line wider than the frame
+  did not wrap at all (confirmed with libass 0.17.1). The script now breaks
+  such lines itself, evenly and after punctuation where possible.
+- **Fixed in 2.1.0's auto-lift:** it assumed long Chinese lines wrap, which
+  they do not by default, so it could lift the top line for a second row
+  that never appeared. Lift, line breaks and the preview now share one
+  model of where rows break.
+
+### Tests
+
+- 110 tests (from 99): line breaking, the worst-moment search, one-pass
+  extraction, killing a cancelled read, and the preview finding the worst
+  moment in a real queued file.
+
 ## 2.1.0 — 2026-10-26
 
 ### The window
