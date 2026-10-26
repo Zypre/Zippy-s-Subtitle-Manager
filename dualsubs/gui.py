@@ -1345,7 +1345,7 @@ class App:
                     continue
                 t = choose_source(media, top)
                 b = choose_source(media, bottom, {t.file} if t.file else set())
-                yield video, self._cues(t, text), self._cues(b, text)
+                yield video, self._cues(t, text, top), self._cues(b, text, bottom)
 
         def work() -> None:
             try:
@@ -1359,10 +1359,15 @@ class App:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _cues(self, choice, text) -> list:
+    def _cues(self, choice, text, spec) -> list:
+        """One side's cues, as the run would use them."""
+        from . import discover, hanzi
+        cues: list = []
+        language = ""
         if choice.track is not None:
-            return text.tracks.get(choice.track.id, [])
-        if choice.file is not None:
+            cues = text.tracks.get(choice.track.id, [])
+            language = choice.track.language or ""
+        elif choice.file is not None:
             stamp = worst.file_stamp(choice.file)
             cached = self.sub_texts.get(choice.file)
             if cached is None or cached[0] != stamp:
@@ -1371,8 +1376,15 @@ class App:
                 except (OSError, ValueError):
                     cached = (stamp, [])
                 self.sub_texts[choice.file] = cached
-            return cached[1]
-        return []
+            cues = cached[1]
+            language = (spec.language
+                        or discover.trailing_language(choice.file.stem.lower()) or "")
+        if language == "chi":
+            # The Japanese half of a bilingual track is left out of the run,
+            # so it is left out of the preview too.
+            cues = [(s, e, kept) for s, e, t in cues
+                    if (kept := hanzi.strip_japanese(t))]
+        return cues
 
     def _side_style(self, side: str) -> render.SideStyle:
         v = self.vars
