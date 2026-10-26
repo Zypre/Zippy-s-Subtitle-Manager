@@ -149,15 +149,26 @@ def run_cancellable(cmd: list[str], should_stop) -> subprocess.CompletedProcess 
     Returns None if it was stopped. For long reads in the background that a
     job touching the same file has to interrupt -- on Windows a file another
     process has open cannot be renamed.
+
+    The waiting is done by communicate(), which keeps reading the child's
+    output, never by polling. A pipe holds only so much (about 4 KB on
+    Windows); a child whose output is not being read stops dead once it is
+    full, and then waits forever for a reader that is itself waiting for the
+    child to exit. mkvextract prints a line per track and a hundred progress
+    updates, which is enough on a release with many subtitle tracks.
     """
-    import time
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace", **_quiet())
-    while proc.poll() is None:
-        if should_stop():
-            proc.kill()
-            proc.communicate()
-            return None
-        time.sleep(0.1)
-    out, err = proc.communicate()
-    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+    if should_stop():
+        return None
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                            errors="replace", **_quiet())
+    while True:
+        try:
+            out, err = proc.communicate(timeout=0.1)
+        except subprocess.TimeoutExpired:
+            if should_stop():
+                proc.kill()
+                proc.communicate()
+                return None
+            continue
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)

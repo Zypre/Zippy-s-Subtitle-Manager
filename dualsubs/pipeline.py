@@ -63,6 +63,8 @@ class SideResult:
     sync_note: str = ""
     convert_note: str = ""
     encoding: str = ""
+    #: Canonical language of what was actually read, when known.
+    language: str = ""
 
 
 @dataclass
@@ -167,7 +169,8 @@ def resolve_side(media: MediaInfo, spec: SideSpec, tools: Toolset,
                 raise
             events = []
         if events:
-            return SideResult(events, f"embedded {track.describe()}")
+            return SideResult(events, f"embedded {track.describe()}",
+                              language=track.language or "")
         if spec.track_id is not None:
             raise SideError(f"track #{track.id} contained no readable cues")
         # A language match that would not extract: try the files on disk.
@@ -181,7 +184,9 @@ def resolve_side(media: MediaInfo, spec: SideSpec, tools: Toolset,
     if not events:
         raise SideError(f"{path.name} contained no readable cues")
     label = "file" if spec.file else "external"
-    result = SideResult(events, f"{label} {path.name}", path, encoding=encoding)
+    language = spec.language or discover.trailing_language(path.stem.lower()) or ""
+    result = SideResult(events, f"{label} {path.name}", path, encoding=encoding,
+                        language=language)
     _maybe_sync(media, result, tools, workdir, cfg, spec.language)
     return result
 
@@ -404,10 +409,15 @@ def _choose_anchor(media: MediaInfo, top_spec: SideSpec, bot_spec: SideSpec,
 def _report(side: SideResult, which: str, convert_mode: str,
             notes: list[str], log) -> None:
     """Log a resolved side, applying any script conversion first."""
+    if side.language == "chi":
+        side.events, dropped = hanzi.drop_japanese(side.events)
+        if dropped:
+            side.convert_note = (f"left out the Japanese of {dropped} line(s) "
+                                 f"(a bilingual track)")
     if convert_mode:
         side.events, note = hanzi.convert_events(side.events, convert_mode)
         if note:
-            side.convert_note = note
+            side.convert_note = "; ".join(n for n in (side.convert_note, note) if n)
     detail = f"{len(side.events)} cues"
     if side.encoding and side.encoding not in ("utf-8", "utf-8-sig"):
         detail += f", read as {side.encoding}"

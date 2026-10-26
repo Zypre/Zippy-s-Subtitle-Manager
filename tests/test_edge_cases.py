@@ -367,10 +367,91 @@ def test_the_worst_across_files_names_its_file():
     assert moment.video == Path("e2.mkv")
 
 
+def test_a_chatty_child_process_cannot_hang_a_cancellable_run():
+    # The background read waited for mkvextract without reading its output.
+    # Once that output filled the pipe (about 4 KB on Windows: a line per
+    # track plus a hundred progress updates), both sides waited forever.
+    import time
+    from dualsubs.tools import run_cancellable
+    deadline = time.time() + 20
+    code = "import sys; sys.stdout.write('x' * 1000000); sys.stderr.write('e' * 1000000)"
+    result = run_cancellable([sys.executable, "-c", code], lambda: time.time() > deadline)
+    assert result is not None, "hung until stopped"
+    assert len(result.stdout) == len(result.stderr) == 1000000
+
+
 def test_compact_keeps_dialogue_and_drops_placed_signs():
     events = [Event(50, 90, r"{\i1}Hello{\i0}\Nthere"),
               Event(0, 40, r"{\an8}SIGN"), Event(10, 20, r"{\b1}  ")]
     assert worst.compact(events) == [(50, 90, r"Hello\Nthere")]
+
+
+# ------------------------------------------------- signs and bilingual tracks
+
+from dualsubs.formats import parse_events
+
+_ASS_HEAD = """[Script Info]
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,52,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,{main},10,10,40,1
+Style: Status,Arial,40,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,7,60,10,60,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def _ass(main_alignment=2, lines=()):
+    body = "\n".join(f"Dialogue: 0,0:00:0{i}.00,0:00:0{i}.50,{style},,0,0,0,,{text}"
+                     for i, (style, text) in enumerate(lines))
+    return _ASS_HEAD.format(main=main_alignment) + body + "\n"
+
+
+def test_a_position_in_a_later_override_block_still_places_a_sign():
+    # This used to look only at the first block, so the sign was pulled down
+    # into the dialogue -- the 4-row status window in the preview.
+    assert Event(0, 1, r"{\fad(200,200)}{\an7\pos(100,100)}Status").has_positional_override
+    assert Event(0, 1, r"{\i1}word{\i0} {\pos(5,5)}x").has_positional_override
+    assert not Event(0, 1, r"{\fad(200,200)}{\i1}Hello").has_positional_override
+
+
+def test_a_sign_placed_by_its_style_keeps_its_place():
+    events = parse_events(_ass(lines=[("Default", "Hello.")] * 6
+                               + [("Status", r"Strength\h10\NMagic\h12")]), "x.ass")
+    status = events[-1]
+    assert status.text.startswith(r"{\an7}") and status.has_positional_override
+    assert not any(e.has_positional_override for e in events[:-1])
+
+
+def test_a_top_aligned_dialogue_style_is_still_dialogue():
+    # A group that puts all its dialogue at the top: that style carries most
+    # lines, so it is the dialogue, not a sign.
+    events = parse_events(_ass(main_alignment=8, lines=[("Default", "Hello.")] * 6), "x.ass")
+    assert not any(e.has_positional_override for e in events)
+
+
+def test_ssa_alignments_are_translated():
+    from dualsubs.formats import _SSA_ALIGNMENT
+    assert _SSA_ALIGNMENT[6] == 8 and _SSA_ALIGNMENT[10] == 5 and _SSA_ALIGNMENT[2] == 2
+
+
+def test_japanese_is_recognised_but_a_stray_kana_is_not():
+    assert hanzi.is_japanese("はい　嘘偽りのない私の本当の称号です")
+    assert hanzi.is_japanese(r"{\fs40}これは日本語です")
+    assert not hanzi.is_japanese("是的，这就是我真正的称号。")
+    assert not hanzi.is_japanese("我の天，这也太厉害了吧")       # stylistic の
+    assert not hanzi.is_japanese("Hello there")
+
+
+def test_the_japanese_half_of_a_bilingual_track_is_left_out():
+    events = [Event(0, 1, "你好，你是谁？"), Event(0, 1, "こんにちは、あなたは誰ですか？"),
+              Event(2, 3, r"这句是双语。\N{\fs40}これは二言語です"),
+              Event(4, 5, "好的。")]
+    kept, removed = hanzi.drop_japanese(events)
+    assert removed == 2
+    assert [e.text for e in kept] == ["你好，你是谁？", "这句是双语。", "好的。"]
 
 
 # --------------------------------------------------------------------------

@@ -153,6 +153,24 @@ line, and draws the window's preview, so all three agree. Positioned signs
 keep their authored layout. Widths are estimated (a full-width glyph is one
 em, anything else about half), erring wide.
 
+## Signs and bilingual tracks
+
+A dialogue track often carries more than dialogue. Typeset signs — a status
+window, a location card — sit where they were placed, either by tags in the
+line (`\pos`, `\move`, `\an`, in any override block) or by a style aligned
+to the top or middle of the screen. Those keep their placement in the dual
+track, are never pulled into the two lines at the bottom, and are left out
+of the preview's worst moment. A style that carries a large share of a
+track's lines is taken to be the dialogue wherever it sits, so a group that
+sets all its dialogue at the top is not mistaken for signs.
+
+Chinese fansubs are often 简日双语 (*jiǎn-rì shuāngyǔ*: 简 *jiǎn* "simplified",
+日 *rì* "Japan(ese)", 双语 *shuāngyǔ* "two languages"), with every line in
+both Chinese and Japanese. On the Chinese side of a dual track the Japanese
+rows are left out — whether they are separate events or a second row of
+one — and the log says how many. Kana gives Japanese away; Chinese does not
+use it, beyond the odd stylistic の, which is not enough to count.
+
 ## Output modes
 
 `--sidecar` skips the remux entirely and writes `<video name>.ass` beside the

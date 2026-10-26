@@ -170,6 +170,43 @@ def test_every_text_track_comes_out_of_one_read():
         assert worst.read_file_text(media, TOOLS, should_stop=lambda: True) is None
 
 
+def test_a_bilingual_chinese_track_loses_its_japanese_and_signs_keep_their_place():
+    head = """[Script Info]
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: CN,Arial,60,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,40,1
+Style: JP,Arial,40,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1
+Style: Status,Arial,40,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,7,60,10,60,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    def line(i, style, text):
+        return f"Dialogue: 0,0:00:{i:02}.00,0:00:{i:02}.80,{style},,0,0,0,,{text}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        chinese = [line(i, "CN", text) for i, text in enumerate(CHS, 1)]
+        chinese += [line(i, "JP", "これは日本語の台詞です") for i in range(1, 7)]
+        english = [line(i, "CN", text) for i, text in enumerate(ENG, 1)]
+        english.append(line(3, "Status", r"Strength\h10\NMagic\h12\NLuck\h3"))
+        (folder / "zh.ass").write_text(head + "\n".join(chinese) + "\n", encoding="utf-8")
+        (folder / "en.ass").write_text(head + "\n".join(english) + "\n", encoding="utf-8")
+        video = _mkv(folder, "Show - S01E01.mkv",
+                     [(folder / "zh.ass", "chi", "Dialogue (Simplified)", True),
+                      (folder / "en.ass", "eng", "Dialogue", True)])
+        result = process(video, SideSpec.parse("chi"), SideSpec.parse("eng"), TOOLS,
+                         _cfg(output_mode="sidecar"), log=lambda _: None)
+        assert result.ok, result.message
+        text = video.with_suffix(".ass").read_text(encoding="utf-8-sig")
+        assert "これは" not in text                    # the Japanese half is gone
+        assert all(c in text for c in CHS)             # the Chinese is all there
+        status = next(l for l in text.splitlines() if "Strength" in l)
+        assert r"{\an7}" in status and r"\pos" not in status   # stays top left
+
+
 def test_a_cancelled_child_process_is_killed():
     import time
     from dualsubs.tools import run_cancellable

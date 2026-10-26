@@ -147,6 +147,59 @@ def detect_script(text: str, sample: int = 20000) -> tuple[str, float]:
 
 
 # --------------------------------------------------------------------------
+# Bilingual tracks
+#
+# Chinese fansubs are often 简日双语 (jiǎn-rì shuāngyǔ, simplified Chinese +
+# Japanese): every line comes twice, once in each language, either as two
+# events at the same moment or as one event of two rows. On the Chinese side
+# of a dual track the Japanese is a third language that was never asked
+# for -- and since both would be put in the top line's place, it would be
+# drawn over the Chinese.
+#
+# Kana is what gives Japanese away: Chinese does not use it, beyond the odd
+# stylistic の, so a row needs at least two kana and a real share of its
+# characters before it counts as Japanese.
+# --------------------------------------------------------------------------
+
+_KANA_RE = re.compile(r"[぀-ヿㇰ-ㇿｦ-ﾟ]")
+_HAN_RE = re.compile(r"[㐀-䶿一-鿿]")
+_TAGS_RE = re.compile(r"\{[^}]*\}")
+_ROW_RE = re.compile(r"\\N")
+
+
+def is_japanese(text: str) -> bool:
+    plain = _TAGS_RE.sub("", text)
+    kana = len(_KANA_RE.findall(plain))
+    han = len(_HAN_RE.findall(plain))
+    return kana >= 2 and kana >= 0.15 * (kana + han)
+
+
+def strip_japanese(text: str) -> str:
+    """Remove the rows of a cue that are Japanese. "" if nothing is left."""
+    rows = _ROW_RE.split(text)
+    kept = [row for row in rows if not is_japanese(row)]
+    if len(kept) == len(rows):
+        return text
+    return r"\N".join(kept) if any(_TAGS_RE.sub("", r).strip() for r in kept) else ""
+
+
+def drop_japanese(events) -> tuple[list, int]:
+    """The Chinese side of a bilingual track. Returns (events, rows removed)."""
+    from dataclasses import replace
+
+    out, removed = [], 0
+    for event in events:
+        text = strip_japanese(event.text)
+        if text == event.text:
+            out.append(event)
+            continue
+        removed += 1
+        if text:
+            out.append(replace(event, text=text))
+    return out, removed
+
+
+# --------------------------------------------------------------------------
 
 
 def convert_events(events, mode: str) -> tuple[list, str]:

@@ -9,9 +9,13 @@ a file called `.ass` can easily contain SubRip data.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field, replace
 
 __all__ = ["Event", "load_events", "load", "parse_events", "sniff_format"]
+
+_BLOCK_RE = re.compile(r"\{[^}]*\}")
+_PLACEMENT_RE = re.compile(r"\\(an\d|a\d+|pos|move|org)")
 
 
 @dataclass
@@ -44,9 +48,13 @@ class Event:
 
     @property
     def has_positional_override(self) -> bool:
-        """True if the cue already places itself (\\an8 signs, \\pos, \\move)."""
-        m = re.match(r"\{[^}]*\}", self.text)
-        return bool(m and re.search(r"\\(an\d|a\d+|pos|move|org)", m.group(0)))
+        """True if the cue places itself (\\an8 signs, \\pos, \\move).
+
+        Any override block counts, not only the first: typesetters write
+        "{\\fad(200,200)}{\\an7\\pos(80,60)}...", and missing that would pull
+        the sign down into the dialogue at the bottom of the screen.
+        """
+        return any(_PLACEMENT_RE.search(block) for block in _BLOCK_RE.findall(self.text))
 
     @property
     def line_count(self) -> int:
@@ -138,8 +146,72 @@ def _vtt_events(text: str) -> list[Event]:
     return _srt_events(text)
 
 
+#: SSA (v4) numbers alignments differently from ASS's numpad layout.
+_SSA_ALIGNMENT = {1: 1, 2: 2, 3: 3, 5: 7, 6: 8, 7: 9, 9: 4, 10: 5, 11: 6}
+
+#: A style used by at least this share of a track's lines is dialogue,
+#: wherever it sits on screen.
+MAIN_STYLE_SHARE = 0.15
+
+
+def _style_alignments(text: str) -> dict[str, int]:
+    """Style name (lowercased) -> numpad alignment, from the styles section."""
+    out: dict[str, int] = {}
+    fmt: list[str] | None = None
+    section = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped.lower()
+            fmt = None
+            continue
+        if section not in ("[v4+ styles]", "[v4 styles]"):
+            continue
+        key, _, rest = stripped.partition(":")
+        if key.lower() == "format":
+            fmt = [f.strip().lower() for f in rest.split(",")]
+        elif key.lower() == "style" and fmt and "alignment" in fmt:
+            values = [v.strip() for v in rest.split(",")]
+            row = dict(zip(fmt, values))
+            try:
+                alignment = int(row.get("alignment", "2"))
+            except ValueError:
+                continue
+            if section == "[v4 styles]":
+                alignment = _SSA_ALIGNMENT.get(alignment, 2)
+            out[row.get("name", "").lstrip("*").lower()] = alignment
+    return out
+
+
+def _place_by_style(events: list[Event], styles: list[str],
+                    alignments: dict[str, int]) -> None:
+    """Write a sign's style placement into its text as {\\anN}.
+
+    Everything this program writes uses its own two styles, so a sign that
+    was placed by *its* style -- top left for a status window, top centre
+    for a location card -- would otherwise land in the dialogue at the
+    bottom. Stated as an override it stays where it was meant to be, and the
+    layout knows to leave it alone.
+
+    Only minor styles qualify. A style carrying a good share of the lines is
+    the dialogue itself, even if a group happens to put it at the top.
+    """
+    if not events or not alignments:
+        return
+    counts = Counter(styles)
+    main = {name for name, n in counts.items()
+            if n >= MAIN_STYLE_SHARE * len(events)}
+    main.add(counts.most_common(1)[0][0])
+    for i, (event, style) in enumerate(zip(events, styles)):
+        alignment = alignments.get(style, alignments.get("default", 2))
+        if style in main or alignment in (1, 2, 3) or event.has_positional_override:
+            continue
+        events[i] = replace(event, text=f"{{\\an{alignment}}}" + event.text)
+
+
 def _ass_events(text: str) -> list[Event]:
     events: list[Event] = []
+    styles: list[str] = []
     fmt: list[str] | None = None
     in_events = False
     for line in text.splitlines():
@@ -178,6 +250,8 @@ def _ass_events(text: str) -> list[Event]:
             margin_v=row.get("marginv", "0") or "0",
             effect=row.get("effect", ""),
         ))
+        styles.append(row.get("style", "").lstrip("*").lower())
+    _place_by_style(events, styles, _style_alignments(text))
     return events
 
 

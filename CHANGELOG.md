@@ -44,6 +44,17 @@ the same name.
   they do not by default, so it could lift the top line for a second row
   that never appeared. Lift, line breaks and the preview now share one
   model of where rows break.
+- **Bilingual Chinese tracks** (简日双语, simplified Chinese + Japanese) no
+  longer put their Japanese on the top line. Every Japanese row on the
+  Chinese side is left out, whether it is its own event or a second row of
+  one; both used to be drawn over the Chinese. Kana is the tell: Chinese
+  does not use it, so a stray stylistic の does not count.
+- **Signs stay where they were placed.** A sign whose position is set in a
+  later override block (`{\fad(..)}{\an7\pos(..)}`) used to be missed, and
+  one placed by its style (a top-left status window) had that placement
+  lost; both were pulled down into the bottom line. A minor style's
+  placement is now written into its lines, and a style carrying a good
+  share of the track counts as dialogue wherever it sits.
 
 ### Tests
 

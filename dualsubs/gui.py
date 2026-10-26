@@ -1275,6 +1275,8 @@ class App:
         tools, stop = self.tools, self.text_stop
 
         def work() -> None:
+            import time
+            started, read, size = time.time(), 0, 0
             try:
                 for i, media in enumerate(todo):
                     if stop.is_set():
@@ -1283,10 +1285,16 @@ class App:
                     text = worst.read_file_text(media, tools, stop.is_set)
                     if text is None:              # stopped part way
                         break
+                    read += 1
+                    size += (text.stamp or (0, 0))[0]
                     self.messages.put(("text_done", (media.path, text)))
             except Exception:
                 self._post(traceback.format_exc(), "error")
             finally:
+                if read:
+                    self._post(f"preview: read the subtitles of {read} file(s), "
+                               f"{size / 1e9:.1f} GB, in {time.time() - started:.0f} s\n",
+                               "dim")
                 self.messages.put(("text_scan_end", None))
 
         self.text_thread = threading.Thread(target=work, daemon=True)
@@ -1337,7 +1345,7 @@ class App:
                     continue
                 t = choose_source(media, top)
                 b = choose_source(media, bottom, {t.file} if t.file else set())
-                yield video, self._cues(t, text), self._cues(b, text)
+                yield video, self._cues(t, text, top), self._cues(b, text, bottom)
 
         def work() -> None:
             try:
@@ -1351,10 +1359,15 @@ class App:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _cues(self, choice, text) -> list:
+    def _cues(self, choice, text, spec) -> list:
+        """One side's cues, as the run would use them."""
+        from . import discover, hanzi
+        cues: list = []
+        language = ""
         if choice.track is not None:
-            return text.tracks.get(choice.track.id, [])
-        if choice.file is not None:
+            cues = text.tracks.get(choice.track.id, [])
+            language = choice.track.language or ""
+        elif choice.file is not None:
             stamp = worst.file_stamp(choice.file)
             cached = self.sub_texts.get(choice.file)
             if cached is None or cached[0] != stamp:
@@ -1363,8 +1376,15 @@ class App:
                 except (OSError, ValueError):
                     cached = (stamp, [])
                 self.sub_texts[choice.file] = cached
-            return cached[1]
-        return []
+            cues = cached[1]
+            language = (spec.language
+                        or discover.trailing_language(choice.file.stem.lower()) or "")
+        if language == "chi":
+            # The Japanese half of a bilingual track is left out of the run,
+            # so it is left out of the preview too.
+            cues = [(s, e, kept) for s, e, t in cues
+                    if (kept := hanzi.strip_japanese(t))]
+        return cues
 
     def _side_style(self, side: str) -> render.SideStyle:
         v = self.vars
@@ -1399,12 +1419,14 @@ class App:
                     f"{moment.bottom_rows} below")
         elif not self.vars["preview_worst"].get():
             text = "Sample text."
-        elif reading:
+        elif not self.videos:
+            text = "Sample text. Queue videos to preview the worst moment in them."
+        elif reading or self.scanning:
             text = "Sample text for now."
-        elif self.videos and self.texts:
+        elif self.texts:
             text = "Sample text: none of the queued files has text for these lines."
         else:
-            text = "Sample text. Queue videos to preview the worst moment in them."
+            text = "Sample text until the queued files have been read."
         self.preview_caption.set(text + (f"   ({reading})" if reading else ""))
 
     def run_or_stop(self) -> None:
