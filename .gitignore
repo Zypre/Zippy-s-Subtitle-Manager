@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# PyInstaller output (build/*.py are the build scripts and are tracked)
+dist/
+build/_work/
+build/*.spec
+
+# Per-user settings, written next to the program on first run
+dual_subs.config.json
+
+# MKVToolNix binaries: fetch with build/fetch_mkvtoolnix.py (GPLv2, ~55 MB)
+*.exe
+tools/
+
+# Logs the program leaves beside media while testing
+dual_subs_renames.json
