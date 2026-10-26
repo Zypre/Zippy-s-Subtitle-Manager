@@ -78,55 +78,103 @@ class FileResult:
 # --------------------------------------------------------------------------
 
 
-def resolve_side(media: MediaInfo, spec: SideSpec, tools: Toolset,
-                 workdir: Path, cfg: Config, claimed: set[Path],
-                 tag: str) -> SideResult:
-    """Find this side's subtitles: explicit file > explicit track > embedded > external."""
+@dataclass
+class SourceChoice:
+    """Where one side's text will come from, decided without extracting it."""
+
+    track: Track | None = None
+    file: Path | None = None
+    problem: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.problem
+
+    def short(self) -> str:
+        """A compact description, for a table cell."""
+        if self.problem:
+            return self.problem
+        if self.file is not None:
+            return f"file: {self.file.name}"
+        t = self.track
+        name = f' "{t.name}"' if t.name else ""
+        return f"#{t.id} {langs.display(t.raw_language)}{name}"
+
+
+def choose_source(media: MediaInfo, spec: SideSpec,
+                  claimed: set[Path] | None = None) -> SourceChoice:
+    """Explicit file > explicit track > embedded text track > file on disk.
+
+    Pure decision, no extraction, so the window can show for every queued
+    file which track or file each line will come from before anything runs.
+    `resolve_side` makes the same call and then does the work.
+    """
     if spec.file:
-        events, encoding = load(spec.file, spec.language)
-        if not events:
-            raise SideError(f"{spec.file.name} contained no readable cues")
-        result = SideResult(events, f"file {spec.file.name}", spec.file,
-                            encoding=encoding)
-        _maybe_sync(media, result, tools, workdir, cfg, spec.language)
-        return result
+        return SourceChoice(file=spec.file)
 
     if spec.track_id is not None:
         track = next((t for t in media.tracks if t.id == spec.track_id), None)
         if track is None:
-            raise SideError(f"no subtitle track #{spec.track_id} in this file")
-        events = probe.extract_events(media, track, tools, workdir / tag)
-        return SideResult(events, f"embedded {track.describe()}")
+            return SourceChoice(problem=f"no subtitle track #{spec.track_id}")
+        if track.is_image:
+            return SourceChoice(problem=f"track #{track.id} is image-based "
+                                        f"({track.codec}); it has no text")
+        return SourceChoice(track=track)
 
     if not spec.language:
-        raise SideError("no language given")
+        return SourceChoice(problem="no language given")
 
     track = _best_embedded(media, spec)
     if track is not None:
+        return SourceChoice(track=track)
+    return _external_choice(media, spec, claimed)
+
+
+def _external_choice(media: MediaInfo, spec: SideSpec,
+                     claimed: set[Path] | None) -> SourceChoice:
+    cand = discover.pick(media.path, spec.language, exclude=claimed)
+    if cand is not None:
+        return SourceChoice(file=cand.path)
+    image_only = media.subtitle_tracks(spec.language, text_only=False)
+    hint = ""
+    if image_only:
+        hint = (f" (the only {langs.display(spec.language)} track is "
+                f"image-based: {image_only[0].codec})")
+    return SourceChoice(problem=(
+        f"no {langs.display(spec.language)} subtitles found - "
+        f"not embedded as text and no matching file on disk{hint}"))
+
+
+def resolve_side(media: MediaInfo, spec: SideSpec, tools: Toolset,
+                 workdir: Path, cfg: Config, claimed: set[Path],
+                 tag: str) -> SideResult:
+    """Find this side's subtitles: explicit file > explicit track > embedded > external."""
+    choice = choose_source(media, spec, claimed)
+
+    if choice.track is not None:
+        track = choice.track
         try:
             events = probe.extract_events(media, track, tools, workdir / tag)
-            if events:
-                return SideResult(events, f"embedded {track.describe()}")
-        except ProbeError as exc:
-            pass   # fall through to the external search
+        except ProbeError:
+            if spec.track_id is not None:
+                raise
+            events = []
+        if events:
+            return SideResult(events, f"embedded {track.describe()}")
+        if spec.track_id is not None:
+            raise SideError(f"track #{track.id} contained no readable cues")
+        # A language match that would not extract: try the files on disk.
+        choice = _external_choice(media, spec, claimed)
 
-    cand = discover.pick(media.path, spec.language, exclude=claimed)
-    if cand is None:
-        image_only = media.subtitle_tracks(spec.language, text_only=False)
-        hint = ""
-        if image_only:
-            hint = (f" (the only {langs.display(spec.language)} track is "
-                    f"image-based: {image_only[0].codec})")
-        raise SideError(
-            f"no {langs.display(spec.language)} subtitles found - "
-            f"not embedded as text and no matching file on disk{hint}"
-        )
+    if choice.problem:
+        raise SideError(choice.problem)
 
-    events, encoding = load(cand.path, spec.language)
+    path = choice.file
+    events, encoding = load(path, spec.language)
     if not events:
-        raise SideError(f"{cand.path.name} contained no readable cues")
-    result = SideResult(events, f"external {cand.path.name}", cand.path,
-                        encoding=encoding)
+        raise SideError(f"{path.name} contained no readable cues")
+    label = "file" if spec.file else "external"
+    result = SideResult(events, f"{label} {path.name}", path, encoding=encoding)
     _maybe_sync(media, result, tools, workdir, cfg, spec.language)
     return result
 
@@ -194,6 +242,13 @@ def process(video: Path, top_spec: SideSpec, bot_spec: SideSpec, tools: Toolset,
 
     clashes = [p for p, wanted in ((out_mkv, want_mux), (out_ass, want_sidecar))
                if wanted and p.exists()]
+    if want_sidecar and out_ass.exists() and not discover.is_generated(out_ass):
+        # Releases do ship "<episode>.ass" beside "<episode>.mkv". Overwriting
+        # it would destroy the very subtitles this run may be reading from.
+        return FileResult(video, False, message=(
+            f"{out_ass.name} already exists and was not made by dual_subs, so "
+            f"it is never overwritten. Set a sidecar suffix (e.g. .dual) to "
+            f"write alongside it."))
     if clashes and not overwrite:
         names = ", ".join(p.name for p in clashes)
         return FileResult(video, False, message=f"{names} already exists (use --overwrite)")

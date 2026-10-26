@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from . import langs
+from . import discover, langs
 from .probe import MediaInfo, ProbeError, probe
 from .tools import Toolset
 
@@ -43,6 +43,8 @@ class TrackOption:
     names: set[str] = field(default_factory=set)
     files: int = 0
     total: int = 0
+    #: Files where this came from a subtitle file on disk, not an embedded track.
+    on_disk: int = 0
 
     @property
     def spec(self) -> str:
@@ -54,6 +56,8 @@ class TrackOption:
 
     def describe(self) -> str:
         name = sorted(self.names)[0] if self.names else ""
+        if not name and self.on_disk:
+            name = "subtitle file on disk"
         where = "all files" if self.everywhere else f"{self.files} of {self.total}"
         bits = [b for b in (langs.display(self.language), name) if b]
         return f"{' · '.join(bits)}  ({where})"
@@ -69,12 +73,18 @@ class Survey:
     subtitles: list[TrackOption] = field(default_factory=list)
     scanned: int = 0
     failed: list[str] = field(default_factory=list)
+    #: What each file contained, so callers can decide per file without
+    #: running mkvmerge a second time.
+    media: dict = field(default_factory=dict)
 
     def audio_entries(self) -> list[str]:
         return [o.entry() for o in self.audio]
 
-    def subtitle_entries(self) -> list[str]:
-        return [o.entry() for o in self.subtitles]
+    def subtitle_entries(self, embedded_only: bool = False) -> list[str]:
+        """`embedded_only` drops options that exist only as files on disk,
+        which a default-track flag cannot point at."""
+        return [o.entry() for o in self.subtitles
+                if not (embedded_only and o.on_disk >= o.files)]
 
     def summary(self) -> str:
         if not self.scanned:
@@ -153,6 +163,7 @@ def survey(paths, tools: Toolset, progress=None, should_stop=None) -> Survey:
             continue
 
         result.scanned += 1
+        result.media[path] = media
         for kind, tracks_, bucket, seen in (("audio", media.audio, audio, audio_seen),
                                             ("subtitle", media.tracks, subs, subs_seen)):
             keys = set()
@@ -169,6 +180,21 @@ def survey(paths, tools: Toolset, progress=None, should_stop=None) -> Survey:
                     bucket[key] = option
                 if getattr(track, "name", ""):
                     option.names.add(track.name)
+            if kind == "subtitle":
+                # Files on disk count too: an external .chi.srt is as much an
+                # option for the top or bottom line as an embedded track.
+                for cand in discover.find_candidates(path):
+                    if not cand.language:
+                        continue
+                    key = (cand.language, "")
+                    option = bucket.get(key)
+                    if option is None:
+                        option = bucket[key] = TrackOption(
+                            kind=kind, language=cand.language,
+                            raw_language=cand.language, total=total)
+                    if key not in keys:
+                        option.on_disk += 1
+                        keys.add(key)
             for key in keys:
                 seen[key] = seen.get(key, 0) + 1
         if progress:

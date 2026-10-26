@@ -22,7 +22,8 @@ from . import langs
 from .probe import AudioTrack, MediaInfo, Track
 from .tools import Toolset, run
 
-__all__ = ["TrackWish", "Selection", "choose", "apply_flags", "FlagError"]
+__all__ = ["TrackWish", "Selection", "choose", "apply_flags", "FlagError",
+           "FlagOutcome", "settle_flags", "wants_flags"]
 
 
 class FlagError(RuntimeError):
@@ -278,3 +279,67 @@ def apply_flags(media: MediaInfo, sel: Selection, tools: Toolset,
 def _ordinal(tracks, track) -> int:
     """1-based position within its own kind, for mkvpropedit's track:s2 form."""
     return [t.id for t in tracks].index(track.id) + 1
+
+
+@dataclass
+class FlagOutcome:
+    """What settle_flags did to one file, as lines ready to print."""
+
+    lines: list[str] = field(default_factory=list)
+    edits: list[str] = field(default_factory=list)
+    ok: bool = True
+
+
+def wants_flags(audio: str = "", subtitles: str = "", subtitles_off: bool = False,
+                newest_subtitle: bool = False) -> bool:
+    return bool(audio or subtitles or subtitles_off or newest_subtitle)
+
+
+def settle_flags(path, tools: Toolset, *, audio: str = "", subtitles: str = "",
+                 subtitles_off: bool = False, newest_subtitle: bool = False,
+                 dry_run: bool = False) -> FlagOutcome:
+    """Read `path`, choose the default tracks, and write them.
+
+    The one place the command line and the window both go through, whether
+    the file is a fresh remux or an original left in place.
+
+    `newest_subtitle` makes the last subtitle track the default: after a mux
+    that is the dual track this run appended. mkvmerge copies every source
+    track's flags, so it is not enough for the new track to be marked
+    default -- the originals have to be cleared as well.
+    """
+    from .probe import ProbeError, probe
+
+    if tools.mkvpropedit is None:
+        return FlagOutcome(["! mkvpropedit was not found; it ships with "
+                            "MKVToolNix and is what changes default tracks"],
+                           ok=False)
+    try:
+        media = probe(path, tools)
+    except (ProbeError, OSError) as exc:
+        return FlagOutcome([f"! {exc}"], ok=False)
+
+    audio_wish = TrackWish.parse(audio) if audio else None
+    subs_wish = TrackWish.parse(subtitles) if subtitles and not newest_subtitle else None
+    sel = choose(media, audio_wish, subs_wish,
+                 subtitles_off=subtitles_off and not newest_subtitle)
+    if newest_subtitle and media.tracks:
+        sel.subtitle = media.tracks[-1]
+        sel.subtitle_off = False
+        sel.reasons.append(f"subtitles -> track {sel.subtitle.id} "
+                           f"{sel.subtitle.name or 'dual'} (the track just created)")
+
+    out = FlagOutcome(list(sel.reasons) + [f"! {w}" for w in sel.warnings])
+    if sel.audio is None and sel.subtitle is None and not sel.subtitle_off:
+        out.ok = False
+        return out
+    try:
+        out.edits = apply_flags(media, sel, tools, dry_run=dry_run)
+    except FlagError as exc:
+        out.lines.append(f"! mkvpropedit: {exc}")
+        out.ok = False
+        return out
+    verb = "would set" if dry_run else "set"
+    out.lines.append(f"{verb} {len(out.edits)} flag(s)" if out.edits
+                     else "flags already correct")
+    return out

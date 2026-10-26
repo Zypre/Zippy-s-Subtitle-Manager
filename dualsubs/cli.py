@@ -169,101 +169,54 @@ def show_tracks(video: Path, tools, cfg: Config) -> None:
         print("  on disk   (no matching subtitle files)")
 
 
-def _flags_after_mux(result, tools, args) -> list[str]:
-    """Set default flags on the file we just wrote.
+def _flags_after_run(result, video: Path, tools, args) -> list[str]:
+    """Settle default flags once a file has been processed.
 
-    mkvmerge copies each source track's flags, so the dual track being marked
-    default does not stop the original Chinese and English tracks from also
-    being default -- which is what the player actually sees. The flags have to
-    be settled after the fact.
+    After a remux they go on the file just written: mkvmerge copies each
+    source track's flags, so the dual track being marked default does not stop
+    the original Chinese and English tracks from also being default, and the
+    flags have to be settled after the fact. In subtitle-file mode nothing new
+    was written, so they go on the original -- a header edit, not a remux.
     """
-    from . import probe as probe_mod
-    from .tracks import FlagError, Selection, TrackWish, apply_flags, choose
+    from .tracks import settle_flags
 
     target = next((p for p in result.written if p.suffix.lower() == ".mkv"), None)
+    lines = []
     if target is None:
-        return ["(no MKV written, so there are no flags to set)"]
-    if tools.mkvpropedit is None:
-        return ["! mkvpropedit not found; default flags left as mkvmerge wrote them"]
-
-    try:
-        media = probe_mod.probe(target, tools)
-    except probe_mod.ProbeError as exc:
-        return [f"! could not re-read the output: {exc}"]
-
-    audio_wish = TrackWish.parse(args.set_audio) if args.set_audio else None
-    sel = choose(media, audio_wish, None, subtitles_off=args.subs_off)
-
-    if args.set_dual:
-        # The dual track is the one this run appended: the last subtitle track.
-        if media.tracks:
-            sel.subtitle = media.tracks[-1]
-            sel.subtitle_off = False
-            sel.reasons.append(
-                f"subtitles -> track {sel.subtitle.id} "
-                f"{sel.subtitle.name or 'dual'} (the track just created)")
-    elif args.set_subs:
-        wish = TrackWish.parse(args.set_subs)
-        picked = choose(media, None, wish)
-        sel.subtitle = picked.subtitle
-        sel.reasons += picked.reasons
-        sel.warnings += picked.warnings
-
-    lines = list(sel.reasons) + [f"! {w}" for w in sel.warnings]
-    try:
-        edits = apply_flags(media, sel, tools)
-    except FlagError as exc:
-        return lines + [f"! mkvpropedit: {exc}"]
-    lines.append(f"set {len(edits)} flag(s)" if edits else "flags already correct")
-    return lines
+        target = video
+        if args.set_dual:
+            lines.append("(--set-dual needs a remux: in subtitle-file mode "
+                         "there is no dual track inside the video)")
+    outcome = settle_flags(target, tools, audio=args.set_audio or "",
+                           subtitles=args.set_subs or "",
+                           subtitles_off=args.subs_off,
+                           newest_subtitle=args.set_dual and target != video)
+    return lines + outcome.lines
 
 
 def set_defaults(videos: list[Path], tools, args) -> int:
     """Change default audio/subtitle flags without touching the media."""
-    from . import probe as probe_mod
-    from .tracks import FlagError, TrackWish, apply_flags, choose
+    from .tracks import settle_flags
 
     if tools.mkvpropedit is None:
         print("\n[!] mkvpropedit was not found next to mkvmerge; it is part "
               "of MKVToolNix and is what changes flags without a remux.")
         return 2
 
-    audio_wish = TrackWish.parse(args.set_audio) if args.set_audio else None
-    subs_wish = TrackWish.parse(args.set_subs) if args.set_subs else None
-
     changed = untouched = failed = 0
     for i, video in enumerate(videos, 1):
         print(f"\n[{i}/{len(videos)}] {video.name}")
-        try:
-            media = probe_mod.probe(video, tools)
-        except probe_mod.ProbeError as exc:
+        outcome = settle_flags(video, tools, audio=args.set_audio or "",
+                               subtitles=args.set_subs or "",
+                               subtitles_off=args.subs_off, dry_run=args.dry_run)
+        for line in outcome.lines:
+            print(f"    {line}")
+        if not outcome.ok:
             failed += 1
-            print(f"    ! {exc}")
-            continue
-
-        sel = choose(media, audio_wish, subs_wish, subtitles_off=args.subs_off)
-        for reason in sel.reasons:
-            print(f"    {reason}")
-        for warning in sel.warnings:
-            print(f"    ! {warning}")
-        if sel.audio is None and sel.subtitle is None and not sel.subtitle_off:
-            failed += 1
-            continue
-
-        try:
-            edits = apply_flags(media, sel, tools, dry_run=args.dry_run)
-        except FlagError as exc:
-            failed += 1
-            print(f"    ! mkvpropedit: {exc}")
-            continue
-
-        if not edits:
-            untouched += 1
-            print("    already set")
-        else:
+        elif outcome.edits:
             changed += 1
-            verb = "would change" if args.dry_run else "changed"
-            print(f"    {verb} {len(edits)} flag(s)")
+        else:
+            untouched += 1
 
     print(f"\n{changed} changed, {untouched} already correct, {failed} failed.")
     return 1 if failed else 0
@@ -510,7 +463,7 @@ def main(argv: list[str] | None = None) -> int:
             ok += 1
             if not args.dry_run and (args.set_dual or args.set_audio
                                      or args.set_subs or args.subs_off):
-                for line in _flags_after_mux(result, tools, args):
+                for line in _flags_after_run(result, video, tools, args):
                     print(f"    {line}")
             for path in result.written:
                 verb = "would write" if args.dry_run else "->"
