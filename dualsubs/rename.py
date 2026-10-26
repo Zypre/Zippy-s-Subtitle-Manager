@@ -26,7 +26,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .discover import RELEASE_TOKENS, SUBTITLE_EXTS, find_candidates
+from .discover import (RELEASE_TOKENS, SUBTITLE_DIRS, SUBTITLE_EXTS,
+                       find_candidates)
 
 __all__ = ["clean_name", "plan_renames", "apply_renames", "undo_renames",
            "RenamePlan", "UNDO_NAME"]
@@ -192,7 +193,7 @@ def plan_renames(videos, style: str = "episode", limit: int = MAX_PATH,
                          f"itself is too long to fix by renaming the file")
 
         if rename_sidecars and target != video:
-            for cand in find_candidates(video):
+            for cand in find_candidates(video, include_generated=True):
                 if cand.path.parent != video.parent:
                     continue
                 suffix = cand.path.name[len(video.stem):] \
@@ -200,25 +201,62 @@ def plan_renames(videos, style: str = "episode", limit: int = MAX_PATH,
                     else cand.path.suffix
                 plan.sidecars.append(
                     (cand.path, cand.path.with_name(target.stem + suffix)))
+            # A folder named after the video (`<name>/`, `Subs/<name>/`) only
+            # pairs with it while the names agree, so it is renamed too.
+            for parent in [video.parent] + _subtitle_dirs(video.parent):
+                owned = parent / video.stem
+                if owned.is_dir():
+                    plan.sidecars.append((owned, parent / target.stem))
         plans.append(plan)
     return plans
 
 
-def apply_renames(plans: list[RenamePlan], folder: Path | None = None
-                  ) -> tuple[int, list[str]]:
-    """Carry out the plans and write an undo log. Returns (count, problems)."""
-    done: list[dict] = []
+def _subtitle_dirs(folder: Path) -> list[Path]:
+    try:
+        return [d for d in folder.iterdir()
+                if d.is_dir() and d.name.lower() in SUBTITLE_DIRS]
+    except OSError:
+        return []
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """True when two spellings name one file, e.g. a case-only rename on Windows."""
+    try:
+        return a.exists() and b.exists() and a.samefile(b)
+    except OSError:
+        return False
+
+
+def apply_renames(plans: list[RenamePlan]) -> tuple[int, list[str]]:
+    """Carry out the plans. Returns (count, problems).
+
+    Each folder gets its own undo log, so a queue drawn from several folders
+    can be undone from any of them.
+    """
+    done: dict[Path, list[dict]] = {}
     problems: list[str] = []
     count = 0
 
     for plan in plans:
         if not plan.changed:
             continue
+        blocked = plan.target.exists() and not _same_file(plan.source, plan.target)
+        if blocked or not plan.source.exists():
+            # Renaming the sidecars without their video would break the
+            # very pairing this is meant to keep.
+            problems.append(f"{plan.source.name}: "
+                            + ("target already exists" if blocked
+                               else "file is gone"))
+            continue
         pairs = [(plan.source, plan.target)] + plan.sidecars
         moved: list[tuple[Path, Path]] = []
         try:
             for src, dst in pairs:
-                if not src.exists() or dst.exists():
+                if not src.exists():
+                    continue
+                if dst.exists() and not _same_file(src, dst):
+                    problems.append(f"{src.name}: left as is, "
+                                    f"{dst.name} already exists")
                     continue
                 src.rename(dst)
                 moved.append((src, dst))
@@ -232,18 +270,23 @@ def apply_renames(plans: list[RenamePlan], folder: Path | None = None
             continue
         if moved:
             count += 1
-            done += [{"from": str(s), "to": str(d)} for s, d in moved]
+            done.setdefault(plan.source.parent, []).extend(
+                {"from": str(s), "to": str(d)} for s, d in moved)
 
-    if done:
-        target = Path(folder or plans[0].source.parent) / UNDO_NAME
+    for folder, entries in done.items():
+        log = folder / UNDO_NAME
         existing = []
-        if target.exists():
+        if log.exists():
             try:
-                existing = json.loads(target.read_text(encoding="utf-8"))
+                existing = json.loads(log.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 existing = []
-        target.write_text(json.dumps(existing + done, indent=2,
-                                     ensure_ascii=False), encoding="utf-8")
+        try:
+            log.write_text(json.dumps(existing + entries, indent=2,
+                                      ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            problems.append(f"could not write {log}: {exc} (undo will not "
+                            f"know about these renames)")
     return count, problems
 
 
@@ -263,7 +306,7 @@ def undo_renames(folder: Path) -> tuple[int, list[str]]:
         if not src.exists():
             problems.append(f"missing: {src.name}")
             continue
-        if dst.exists():
+        if dst.exists() and not _same_file(src, dst):
             problems.append(f"already there: {dst.name}")
             continue
         try:

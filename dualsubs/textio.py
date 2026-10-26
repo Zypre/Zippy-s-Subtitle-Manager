@@ -212,12 +212,14 @@ def reencode_file(path: str | Path, backup_suffix: str = ".orig",
     """Rewrite a subtitle file as UTF-8 in place. Returns (was_encoding, changed).
 
     The original is kept alongside as `<name>.srt.orig` unless it was already
-    UTF-8, in which case nothing is touched at all.
+    UTF-8, in which case nothing is touched at all. That includes UTF-8 with a
+    byte-order mark: it is still UTF-8, players read it fine (Windows ones
+    rather prefer it), and this program writes its own output that way.
     """
     path = Path(path)
     raw = path.read_bytes()
     encoding, _ = detect_encoding(raw, language)
-    if encoding in ("utf-8", "utf-8-sig") and not raw.startswith(b"\xef\xbb\xbf"):
+    if encoding in ("utf-8", "utf-8-sig"):
         return encoding, False
 
     text = raw.decode(encoding, errors="replace").lstrip("\ufeff")

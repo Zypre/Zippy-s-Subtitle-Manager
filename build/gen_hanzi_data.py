@@ -36,7 +36,14 @@ def find_project_root() -> Path:
 OUT = find_project_root() / "dualsubs" / "_hanzi_data.py"
 
 
-def read(d: Path, name: str) -> dict[str, str]:
+def read(d: Path, name: str, keep_identity: bool = False) -> dict[str, str]:
+    """One OpenCC table.
+
+    Phrase tables need `keep_identity`. Entries like 著名 -> 著名 and
+    乾坤 -> 乾坤 look like no-ops but are the whole point: they stop the
+    single-character table from rewriting 著 and 乾 inside those words.
+    Dropping them produced 着名 and 扭转干坤.
+    """
     out: dict[str, str] = {}
     path = d / name
     if not path.exists():
@@ -49,7 +56,7 @@ def read(d: Path, name: str) -> dict[str, str]:
         if len(parts) < 2:
             continue
         src, dst = parts[0], parts[1].split(" ")[0]   # first value = preferred
-        if src and dst and src != dst:
+        if src and dst and (src != dst or keep_identity):
             out[src] = dst
     return out
 
@@ -68,10 +75,10 @@ def main() -> int:
     args = ap.parse_args()
     d = args.dict
 
-    var_ph = {**read(d, "TWVariantsRevPhrases.txt"),
-              **read(d, "HKVariantsRevPhrases.txt")}
+    var_ph = {**read(d, "TWVariantsRevPhrases.txt", keep_identity=True),
+              **read(d, "HKVariantsRevPhrases.txt", keep_identity=True)}
     var_ch = {**read(d, "TWVariantsRev.txt"), **read(d, "HKVariantsRev.txt")}
-    ts_ph = read(d, "TSPhrases.txt")
+    ts_ph = read(d, "TSPhrases.txt", keep_identity=True)
     ts_ch = read(d, "TSCharacters.txt")
 
     var_one, var_many = split_one_to_one(var_ch)

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from .formats import Event
@@ -30,8 +33,10 @@ class SideStyle:
     border_style: int = 1           # 1 = outline+shadow, 3 = opaque box
 
     def to_style_line(self, name: str) -> str:
+        # A comma would end the field early and shift every value after it.
+        font = self.font.replace(",", " ").strip() or "Arial"
         return (
-            f"Style: {name},{self.font},{self.size},{self.primary},&H000000FF,"
+            f"Style: {name},{font},{self.size},{self.primary},&H000000FF,"
             f"{self.outline_colour},{self.back_colour},"
             f"{-1 if self.bold else 0},{-1 if self.italic else 0},0,0,"
             f"{self.scale_x},{self.scale_y},{self.spacing},0,"
@@ -48,6 +53,17 @@ class Layout:
     auto_lift: bool = True
     line_height_factor: float = 1.2
 
+
+#: Horizontal room a line gets before the renderer wraps it: the canvas less
+#: the style's 10 px left and right margins.
+SIDE_MARGINS = 20
+
+#: Average advance of a narrow (Latin, Cyrillic...) glyph, in ems. Arial's
+#: mixed-case average with spaces sits a little under this; erring wide means
+#: an occasional unnecessary lift, never an overlap.
+NARROW_EM = 0.5
+
+_TAGS_RE = re.compile(r"\{[^}]*\}")
 
 _HEADER = """\
 [Script Info]
@@ -117,7 +133,7 @@ def _position(
     y_bot = layout.play_res_y - bot.margin_v
 
     spans = [
-        (e.start, e.end, e.line_count)
+        (e.start, e.end, visual_lines(e, bot, layout))
         for e in bot_events
         if not e.has_positional_override
     ]
@@ -136,6 +152,26 @@ def _position(
         return ev if ev.has_positional_override else _with_pos(ev, cx, y_bot)
 
     return [place_top(e) for e in top_events], [place_bot(e) for e in bot_events]
+
+
+def visual_lines(ev: Event, style: SideStyle, layout: Layout) -> int:
+    """How many lines a cue will occupy on screen, wrapping included.
+
+    Counting `\\N` alone misses the commonest case: one long line that the
+    renderer wraps by itself. The width is estimated, not measured -- a
+    full-width (CJK) glyph is one em, anything else about half -- which is
+    close enough to know whether a line fits.
+    """
+    avail = max(1, layout.play_res_x - SIDE_MARGINS)
+    em = style.size * style.scale_x / 100
+    total = 0
+    for segment in _TAGS_RE.sub("", ev.text).replace(r"\h", " ").split(r"\N"):
+        width = 0.0
+        for ch in segment:
+            wide = unicodedata.east_asian_width(ch) in ("W", "F")
+            width += em * (1.0 if wide else NARROW_EM) + style.spacing
+        total += max(1, math.ceil(width / avail))
+    return total
 
 
 def _with_pos(ev: Event, x: int, y: int) -> Event:

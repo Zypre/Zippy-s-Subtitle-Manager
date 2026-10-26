@@ -699,8 +699,7 @@ class App:
                 "Sidecar subtitles follow, and this can be undone."):
             return
 
-        folder = self.videos[0].parent
-        count, problems = apply_renames(plans, folder)
+        count, problems = apply_renames(plans)
         for problem in problems:
             self.write(f"  ! {problem}\n", "error")
         for plan in changing:

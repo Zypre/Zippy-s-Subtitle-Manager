@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 
 WINDOWS = os.name == "nt"
@@ -54,12 +55,12 @@ class Toolset:
     #: fatal -- everything else works without it.
     mkvpropedit: Path | None = None
 
-    @property
+    @cached_property
     def version(self) -> str:
+        # Through run(), so the windowed build does not flash a console.
         try:
-            out = subprocess.run([str(self.mkvmerge), "--version"],
-                                 capture_output=True, text=True, timeout=20)
-            return out.stdout.strip().splitlines()[0]
+            return run([str(self.mkvmerge), "--version"], timeout=20
+                       ).stdout.strip().splitlines()[0]
         except Exception:
             return "unknown version"
 

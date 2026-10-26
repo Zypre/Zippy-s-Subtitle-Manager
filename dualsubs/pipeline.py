@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -150,15 +151,28 @@ def _maybe_sync(media: MediaInfo, side: SideResult, tools: Toolset,
 
 
 def _sync_reference(media: MediaInfo, language: str) -> tuple[Track | None, str]:
-    """Prefer a same-language embedded track; any embedded track will do."""
-    same = media.subtitle_tracks(language, text_only=False)
+    """Prefer a same-language embedded track; any embedded track will do.
+
+    Either way it has to be a dialogue track. Releases often list a forced
+    "Signs & Songs" track first, and a handful of sign cues cannot vote on
+    where a thousand lines of dialogue belong -- sync then gives up with
+    "low confidence" when a perfectly good reference was sitting next to it.
+    """
+    same = sorted(media.subtitle_tracks(language, text_only=False), key=_reference_rank)
     if same:
         return same[0], f"embedded {langs.display(language)} track {same[0].id}"
-    others = [t for t in media.tracks]
+    others = sorted(media.tracks, key=_reference_rank)
     if others:
         t = others[0]
         return t, f"embedded {t.raw_language} track {t.id}"
     return None, ""
+
+
+def _reference_rank(track: Track) -> tuple:
+    from .tracks import COMMENTARY_WORDS, SIGNS_WORDS
+    name = (track.name or "").lower()
+    partial = track.forced or any(w in name for w in SIGNS_WORDS + COMMENTARY_WORDS)
+    return (partial, track.id)
 
 
 # --------------------------------------------------------------------------
@@ -174,7 +188,8 @@ def process(video: Path, top_spec: SideSpec, bot_spec: SideSpec, tools: Toolset,
     want_mux = mode in ("mux", "both")
     want_sidecar = mode in ("sidecar", "both")
 
-    out_mkv = dest / f"{video.stem}{cfg.output_suffix}{video.suffix}"
+    # mkvmerge always writes Matroska, whatever the source container was.
+    out_mkv = dest / f"{video.stem}{cfg.output_suffix}.mkv"
     out_ass = dest / f"{video.stem}{cfg.sidecar_suffix}.ass"
 
     clashes = [p for p, wanted in ((out_mkv, want_mux), (out_ass, want_sidecar))
@@ -268,6 +283,16 @@ def process(video: Path, top_spec: SideSpec, bot_spec: SideSpec, tools: Toolset,
 
     except (SideError, ProbeError) as exc:
         return FileResult(video, False, message=str(exc), notes=notes)
+    except subprocess.TimeoutExpired as exc:
+        return FileResult(video, False, notes=notes,
+                          message=f"{Path(exc.cmd[0]).stem} gave no answer after "
+                                  f"{int(exc.timeout)} s")
+    except OSError as exc:
+        # A read-only folder, a full disk, a file locked by a player: one
+        # file fails and the rest of the batch carries on.
+        where = f" ({exc.filename})" if getattr(exc, "filename", None) else ""
+        return FileResult(video, False, notes=notes,
+                          message=f"{exc.strerror or exc}{where}")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

@@ -76,23 +76,53 @@ def available_backends() -> str:
     return "opencc" if _opencc() else "built-in table"
 
 
+#: ASS override blocks: {\fn微軟正黑體\fs40}. A font name inside one has to
+#: stay exactly as written, or the player cannot find the font.
+_OVERRIDE_RE = re.compile(r"\{[^}]*\}")
+
+
 def _apply(text: str, pattern: re.Pattern | None,
            phrases: dict[str, str], table: dict) -> str:
-    if pattern is not None:
-        text = pattern.sub(lambda m: phrases[m.group(0)], text)
-    return text.translate(table)
+    """Phrases first, then single characters -- but only *between* phrases.
+
+    A matched phrase is final. Running the character table over it as well
+    would undo the protections OpenCC writes as identity entries: 乾坤 → 乾坤
+    exists precisely so that 乾 (qián, heaven) is not turned into 干 (gān,
+    dry), and 著名 → 著名 so that 著 (zhù) is not read as the particle 着.
+    """
+    if pattern is None:
+        return text.translate(table)
+    out: list[str] = []
+    pos = 0
+    for m in pattern.finditer(text):
+        out.append(text[pos:m.start()].translate(table))
+        out.append(phrases[m.group(0)])
+        pos = m.end()
+    out.append(text[pos:].translate(table))
+    return "".join(out)
 
 
-def to_simplified(text: str, use_opencc: bool = True) -> str:
-    """繁體 -> 简体. Non-Chinese text passes through untouched."""
-    if not text:
-        return text
+def _convert_plain(text: str, use_opencc: bool) -> str:
     if use_opencc:
         conv = _opencc()
         if conv is not None:
             return conv.convert(text)
     text = _apply(text, _VARIANT_RE, VARIANT_PHRASES, _VARIANT_TABLE)
     return _apply(text, _TS_RE, TS_PHRASES, _TS_TABLE)
+
+
+def to_simplified(text: str, use_opencc: bool = True) -> str:
+    """繁體 -> 简体. Non-Chinese text, and ASS override tags, pass through."""
+    if not text:
+        return text
+    out: list[str] = []
+    pos = 0
+    for m in _OVERRIDE_RE.finditer(text):
+        out.append(_convert_plain(text[pos:m.start()], use_opencc))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(_convert_plain(text[pos:], use_opencc))
+    return "".join(out)
 
 
 def detect_script(text: str, sample: int = 20000) -> tuple[str, float]:

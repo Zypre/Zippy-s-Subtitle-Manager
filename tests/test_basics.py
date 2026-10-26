@@ -284,7 +284,7 @@ def test_rename_round_trip_moves_sidecars_and_undoes(tmp_path=None):
 
         plans = rename.plan_renames([video])
         assert plans[0].changed and plans[0].sidecars
-        count, problems = rename.apply_renames(plans, folder)
+        count, problems = rename.apply_renames(plans)
         assert count == 1 and not problems
         assert not video.exists()
         assert (folder / "S01E06 - A Date With the Strongest Captain of the Knights.mkv").exists()

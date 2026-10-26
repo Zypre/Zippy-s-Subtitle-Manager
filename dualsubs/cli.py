@@ -293,11 +293,12 @@ def rename_files(videos: list[Path], args) -> int:
         print(f"\ndry run: {len(changing)} file(s) would be renamed")
         return 0
 
-    folder = videos[0].parent if videos else Path.cwd()
-    count, problems = apply_renames(plans, folder)
+    count, problems = apply_renames(plans)
     for problem in problems:
         print(f"  ! {problem}")
-    print(f"\n{count} renamed. Undo with:  dual_subs \"{folder}\" --undo-rename")
+    folders = sorted({p.source.parent for p in changing})
+    print(f"\n{count} renamed. Undo with:  dual_subs "
+          + " ".join(f'"{f}"' for f in folders) + " --undo-rename")
     return 1 if problems else 0
 
 
