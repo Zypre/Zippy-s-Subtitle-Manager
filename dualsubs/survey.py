@@ -45,6 +45,9 @@ class TrackOption:
     total: int = 0
     #: Files where this came from a subtitle file on disk, not an embedded track.
     on_disk: int = 0
+    #: A bare language that resolves differently per file -- an embedded
+    #: track in some, a file on disk in others.
+    per_file: bool = False
 
     @property
     def spec(self) -> str:
@@ -56,7 +59,9 @@ class TrackOption:
 
     def describe(self) -> str:
         name = sorted(self.names)[0] if self.names else ""
-        if not name and self.on_disk:
+        if self.per_file:
+            name = "best track or file in each"
+        elif not name and self.on_disk:
             name = "subtitle file on disk"
         where = "all files" if self.everywhere else f"{self.files} of {self.total}"
         bits = [b for b in (langs.display(self.language), name) if b]
@@ -150,6 +155,8 @@ def survey(paths, tools: Toolset, progress=None, should_stop=None) -> Survey:
     subs: dict = {}
     audio_seen: dict = {}
     subs_seen: dict = {}
+    #: Files carrying each subtitle language in any form, for bare options.
+    language_files: dict = {}
 
     for index, path in enumerate(paths, 1):
         if should_stop is not None and should_stop():
@@ -197,6 +204,9 @@ def survey(paths, tools: Toolset, progress=None, should_stop=None) -> Survey:
                         keys.add(key)
             for key in keys:
                 seen[key] = seen.get(key, 0) + 1
+            if kind == "subtitle":
+                for language in {k[0] for k in keys}:
+                    language_files[language] = language_files.get(language, 0) + 1
         if progress:
             progress(index, total)
 
@@ -206,6 +216,16 @@ def survey(paths, tools: Toolset, progress=None, should_stop=None) -> Survey:
             option.files = seen.get(key, 0)
             option.total = result.scanned or total
             out.append(option)
+        if out is result.subtitles:
+            # A bare "chi" picks the embedded track where there is one and
+            # the file on disk where there is not, so when both kinds exist
+            # its reach is every file with Chinese in any form.
+            for option in out:
+                variants = [o for o in out if o.language == option.language
+                            and o is not option]
+                if not option.prefer and option.on_disk and variants:
+                    option.per_file = True
+                    option.files = language_files.get(option.language, option.files)
         # Commonest first, then by language, so the useful ones are at the top.
         out.sort(key=lambda o: (-o.files, o.language, o.prefer))
 

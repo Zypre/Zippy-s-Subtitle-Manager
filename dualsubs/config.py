@@ -57,6 +57,8 @@ class Config:
     bottom: SideStyle = field(default_factory=lambda: SideStyle(
         font="Microsoft YaHei", size=70, margin_v=48))
     layout: Layout = field(default_factory=Layout)
+    #: Window-only state (size, last folder, ...). The command line ignores it.
+    gui: dict = field(default_factory=dict)
 
     # ---------------------------------------------------------------- io
 

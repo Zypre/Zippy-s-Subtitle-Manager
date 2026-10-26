@@ -272,6 +272,24 @@ def test_sync_never_uses_a_signs_track_as_its_reference():
     assert track.id == 3
 
 
+def test_a_missing_track_is_explained_accurately():
+    from dualsubs.pipeline import SideSpec, choose_source
+    pgs = Track(id=7, sub_index=7, codec="HDMV PGS", codec_id="S_HDMV/PGS",
+                language="kor", raw_language="kor", name="")
+    media = MediaInfo(path=Path("/nonexistent/x.mkv"), title="", tracks=[
+        _track(3, "chi", "Dialogue (Simplified)"), pgs])
+    # A text track exists; it just is not the one asked for. This used to
+    # say "the only Chinese track is image-based: SubRip/SRT".
+    problem = choose_source(media, SideSpec.parse("chi:traditional")).problem
+    assert '"traditional"' in problem and "Dialogue (Simplified)" in problem
+    assert "image-based" not in problem
+    problem = choose_source(media, SideSpec.parse("kor")).problem
+    assert "image-based (HDMV PGS)" in problem
+    problem = choose_source(media, SideSpec.parse("jpn")).problem
+    assert "no Japanese subtitles found" in problem
+    assert choose_source(media, SideSpec.parse("chi")).track.id == 3
+
+
 # --------------------------------------------------------------------------
 
 if __name__ == "__main__":

@@ -135,14 +135,21 @@ def _external_choice(media: MediaInfo, spec: SideSpec,
     cand = discover.pick(media.path, spec.language, exclude=claimed)
     if cand is not None:
         return SourceChoice(file=cand.path)
-    image_only = media.subtitle_tracks(spec.language, text_only=False)
-    hint = ""
-    if image_only:
-        hint = (f" (the only {langs.display(spec.language)} track is "
-                f"image-based: {image_only[0].codec})")
+    what = langs.display(spec.language)
+    same = media.subtitle_tracks(spec.language, text_only=False)
+    text = [t for t in same if not t.is_image]
+    if spec.prefer and text:
+        names = ", ".join(f'"{t.name}"' for t in text if t.name) or "only unnamed ones"
+        return SourceChoice(problem=(
+            f'no {what} track matching "{spec.prefer}" (this file has {names}) '
+            f"and no {what} subtitle file on disk"))
+    if same and not text:
+        return SourceChoice(problem=(
+            f"no {what} subtitles as text: the only {what} track is "
+            f"image-based ({same[0].codec}) and there is no matching file on disk"))
     return SourceChoice(problem=(
-        f"no {langs.display(spec.language)} subtitles found - "
-        f"not embedded as text and no matching file on disk{hint}"))
+        f"no {what} subtitles found - not embedded as text and no matching "
+        f"file on disk"))
 
 
 def resolve_side(media: MediaInfo, spec: SideSpec, tools: Toolset,

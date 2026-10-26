@@ -6,13 +6,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import langs, probe
+from . import __version__, langs, probe
 from .config import Config
 from .pipeline import SideSpec, collect_videos, process
 from .probe import ProbeError
 from .tools import ToolError, discover as discover_tools
-
-__version__ = "2.0.0"
 
 BANNER = f"dual_subs {__version__} - dual-language subtitle muxer"
 
@@ -218,7 +216,8 @@ def set_defaults(videos: list[Path], tools, args) -> int:
         else:
             untouched += 1
 
-    print(f"\n{changed} changed, {untouched} already correct, {failed} failed.")
+    verb = "would change" if args.dry_run else "changed"
+    print(f"\n{changed} {verb}, {untouched} already correct, {failed} failed.")
     return 1 if failed else 0
 
 
@@ -343,7 +342,9 @@ def reencode(targets: list[Path], recursive: bool,
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    interactive = not sys.argv[1:]
+    # Judged on the arguments actually given: main([...]) called from code
+    # with an empty sys.argv used to open the window and wait forever.
+    interactive = not (sys.argv[1:] if argv is None else argv)
 
     if args.gui or (interactive and not args.cli):
         try:

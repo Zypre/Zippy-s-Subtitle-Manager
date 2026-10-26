@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from . import langs
@@ -79,8 +80,9 @@ class Candidate:
     neutral: bool             # no language token at all
 
 
-def _tokens(name: str) -> list[str]:
-    return [t for t in re.split(r"[.\-_ ()\[\]]+", name.lower()) if t]
+@lru_cache(maxsize=4096)
+def _tokens(name: str) -> tuple[str, ...]:
+    return tuple(t for t in re.split(r"[.\-_ ()\[\]]+", name.lower()) if t)
 
 
 def _is_resolution(t: str) -> bool:
@@ -91,6 +93,7 @@ def _is_year(t: str) -> bool:
     return bool(re.fullmatch(r"(19|20)\d{2}", t))
 
 
+@lru_cache(maxsize=4096)
 def movie_signature(name: str) -> tuple[str, str | None]:
     """(title, year): the leading tokens before any release/language/year token."""
     title: list[str] = []
@@ -114,6 +117,7 @@ def movie_signature(name: str) -> tuple[str, str | None]:
     return " ".join(title), year
 
 
+@lru_cache(maxsize=4096)
 def trailing_language(name: str) -> str | None:
     """The last language-looking token in a filename, e.g. 'Movie.2019.chs'."""
     for t in reversed(_tokens(name)):
@@ -127,6 +131,7 @@ def trailing_language(name: str) -> str | None:
     return None
 
 
+@lru_cache(maxsize=4096)
 def episode_of(name: str) -> tuple[int | None, int] | None:
     """(season, episode) from a filename, or None if it names no episode."""
     for pattern in EPISODE_RES:
