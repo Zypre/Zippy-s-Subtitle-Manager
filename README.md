@@ -3,25 +3,29 @@ Claude made this. Therefore nobody made this. Use it as you will.
 
 ---
 
-# dual_subs 2.0
+# dual_subs 2.1.0
 
-Muxes two subtitle languages into an MKV as one styled ASS track — one line on
-top, one on the bottom. Each side is resolved independently: an embedded track
-if there is one, otherwise a matching subtitle file on disk, retimed to the
-video if it needs it.
+Puts two subtitle languages on screen at once, as one styled ASS track — one
+line on top, one on the bottom. Each side is resolved independently: an
+embedded track if there is one, otherwise a matching subtitle file on disk,
+retimed to the video if it needs it. The result is either a subtitle file
+beside the video (seconds) or a new MKV with the track inside (a remux).
 
 This is a Python port of `dual_subs.bat`. Same behaviour, no base64, and it
 takes a path instead of having to live in the folder it processes.
+
+What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
 ## Running it
 
-Double-click `dual_subs_gui.exe`, or drag files and folders onto its icon — they
-arrive pre-queued. Fonts, sizes, margins, spacing and timing options all live in the window's
-tabs and are written to the settings file when you run, save, or close it — so
-the next run, and the command line, both pick them up. Everything the window
-does is also on the command line:
+Double-click `dual_subs_gui.pyw` (no console window) or `dual_subs.bat`, or
+with a built copy `dual_subs_gui.exe`; drag files and folders onto the `.exe`'s
+icon and they arrive pre-queued. Fonts, sizes, margins, spacing and timing
+options all live in the window's tabs and are written to the settings file
+when you run, save, or close it — so the next run, and the command line, both
+pick them up. Everything the window does is also on the command line:
 
 ```
 dual_subs .                          # this folder, prompts for languages
@@ -67,6 +71,57 @@ Without PyInstaller: `py -3 dual_subs.py .` or double-click `dual_subs.bat`.
 Exit codes: `0` all good, `1` at least one file failed, `2` couldn't find
 MKVToolNix.
 
+## The window
+
+```
+ File  Tools  Help
+ [Add files...] [Add folder...] [ ] include subfolders    [Remove] [Clear] [Tools]
+ ┌ File ──────────────────────────┬ Top line ─────────────────┬ Bottom line ──────┬ Result ┐
+ │ ▾ Season 1  — D:\Anime\Show\Season 1                                           3 file(s)│
+ │     … S01E01 - Arrival …       │ #5 Chinese "Dialogue (S…  │ #4 English "Dial… │ ✓ .ass │
+ │     … S01E02 - Departure …     │ #5 Chinese "Dialogue (S…  │ #4 English "Dial… │ ✓ .ass │
+ │     … S01E03 - Return …        │ ✗ no Chinese track mat…   │ #4 English "Dial… │        │
+ └────────────────────────────────┴───────────────────────────┴───────────────────┴────────┘
+  Subtitles | Appearance | Timing | Default tracks
+  ...
+                                                                     [▮▮▮▯▯▯]  [ Run ]
+```
+
+**The queue says what will happen before it happens.** Files are grouped by
+folder, and as soon as they have been read the *Top line* and *Bottom line*
+columns show, per file, the exact embedded track or subtitle file each line
+will come from. They update as you change the selectors, so the classic
+surprise — `chi` meaning Simplified in one release and Traditional in the next,
+or one episode of eight simply lacking the track — shows up in orange before a
+long remux rather than after it. A line under the options sums it up ("Ready:
+both lines found in all 8 files", or how many would fail and why). Long names
+are trimmed to the part that differs between files; hover any cell for the
+full text, double-click a file to inspect it, right-click for more.
+
+**Run becomes Stop** while a batch runs; it stops after the current file.
+Everything that touches files — inspecting, setting flags, renaming,
+re-encoding — runs in the background, one job at a time, so the window never
+freezes and two jobs never touch the same file.
+
+The tabs:
+
+- **Subtitles** — which language goes on each line (pick from what the files
+  contain, or type a spec; `...` chooses one particular file), **Swap**, the
+  output mode, and traditional → simplified conversion.
+- **Appearance** — font, size, margin, spacing, width, bold, italic, colour
+  and outline per line, with a live preview of the bottom of a 1080p frame.
+- **Timing** — retiming files from disk, and how the two lines are kept in
+  step. Settings that do not apply to the chosen mode are greyed out.
+- **Default tracks** — which audio and subtitle track a player starts with.
+  Run applies them after each file (to the new MKV after a remux, to the
+  original in subtitle-file mode); **Set flags now** applies them on their own.
+
+Hover over any option for a short explanation. The **Tools** menu (also a
+button on the toolbar) has Inspect, Set default tracks, Shorten file names,
+**Undo last rename**, Convert subtitle files to UTF-8 and Locate MKVToolNix.
+Shortcuts: Ctrl+O add files, Ctrl+Shift+O add folder, Delete remove, Ctrl+I
+inspect, Ctrl+S save settings, Ctrl+Enter run.
+
 ## Output modes
 
 `--sidecar` skips the remux entirely and writes `<video name>.ass` beside the
@@ -74,6 +129,12 @@ video. Because the stem matches exactly, mpv and VLC pick it up on their own
 with no configuration. It takes about a second per episode instead of however
 long it takes to rewrite a few GB, and the original file is never touched — so
 nothing is stashed into `_originals\` in this mode either.
+
+If a `<video name>.ass` is already there and this program did not write it —
+some releases ship their subtitles that way — it is never overwritten, even
+with `--overwrite`; set `sidecar_suffix` (e.g. `".dual"`) in the settings file
+to write `<video name>.dual.ass` beside it instead. Output from an earlier run
+is recognised by its header and is never read back in as a source.
 
 Remuxing still earns its place when you want one self-contained file, or when
 the player is a TV or a phone that won't load loose subtitle files. `--both`
@@ -166,6 +227,10 @@ dual_subs "D:\Films" -A eng --subs-off                  # English audio, subtitl
 Nothing is re-encoded, no new file is written, and re-running is a no-op.
 `--dry-run` shows the decisions without writing.
 
+Combined with a run (`-t`/`-b`), the flags are settled after each file: on the
+new MKV after a remux, or on the original in `--sidecar` mode, since there is
+no new MKV to put them on.
+
 ### Seeing what is actually there
 
 `--list` on more than one file ends with the options for the whole queue,
@@ -193,7 +258,9 @@ line, default audio, default subtitles — and refreshes whenever the queue
 changes. It runs in the background, one mkvmerge call per file, so a season is
 quick and a library takes a little longer while the rest of the window stays
 usable. You can still type a spec the scan did not find; it is passed through
-unchanged.
+unchanged. Languages found only as subtitle files on disk (`.chi.srt`) are
+offered for the top and bottom lines too, though not for the default
+subtitle track, which can only point at a track inside the file.
 
 ### Picking the track you meant
 
@@ -273,7 +340,8 @@ handled too: `The.Matrix.1999.2160p.UHD.BluRay.x265.HDR.Atmos-GROUP` becomes
 Sidecar subtitles are renamed to match, so they keep pairing with their video.
 Every rename is logged to `dual_subs_renames.json` beside the files, which is
 what `--undo-rename` reads. Nothing is ever overwritten: a collision gets a
-numeric suffix instead. The window has the same thing as **Shorten names**.
+numeric suffix instead. The window has the same thing under **Tools → Shorten
+file names**, and **Tools → Undo last rename** puts it back.
 
 If the folder itself is the problem, renaming the file cannot fix it, and the
 output says so rather than pretending otherwise.
@@ -294,7 +362,8 @@ bottom : external Shaolin.Soccer.2001.chi.srt  (1178 cues, read as gb18030)
 
 `--reencode` normalises files on disk instead, keeping the original as
 `<name>.srt.orig`. It needs neither MKVToolNix nor a video, is safe to re-run,
-and the GUI has the same thing as **Subtitles to UTF-8**.
+and the window has the same thing under **Tools → Convert subtitle files to
+UTF-8**.
 
 ```
 dual_subs "D:\Films" --reencode -b chi -r
@@ -473,8 +542,20 @@ dualsubs\
   config.py      settings, incl. import from the old .bat
   cli.py         argument parsing and console output
   gui.py         the tkinter window
-tests\           pure-logic tests, no MKVToolNix needed
+tests\
+  test_basics.py       pure logic, no MKVToolNix needed
+  test_edge_cases.py   regressions for the 2.1.0 fixes, likewise
+  test_end_to_end.py   real MKVs built by mkvmerge; skipped without MKVToolNix
+  test_gui.py          the window, built but never shown; skipped without a
+                       display, and never touches your settings file
 ```
 
-`python -m pytest tests` (or `python tests/test_basics.py`) to check nothing
-broke after an edit.
+`python -m pytest tests` (or `python tests/test_basics.py` and so on, without
+pytest) to check nothing broke after an edit.
+
+## Versions
+
+The version lives in `dualsubs/__init__.py` and nowhere else; the window
+title, the console banner and every generated `.ass` read it from there.
+[CHANGELOG.md](CHANGELOG.md) has what changed in each release and how to cut
+one.
