@@ -1,0 +1,3 @@
+* text=auto eol=lf
+# cmd.exe can mis-handle labels in LF-only batch files
+*.bat text eol=crlf
