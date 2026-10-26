@@ -1275,6 +1275,8 @@ class App:
         tools, stop = self.tools, self.text_stop
 
         def work() -> None:
+            import time
+            started, read, size = time.time(), 0, 0
             try:
                 for i, media in enumerate(todo):
                     if stop.is_set():
@@ -1283,10 +1285,16 @@ class App:
                     text = worst.read_file_text(media, tools, stop.is_set)
                     if text is None:              # stopped part way
                         break
+                    read += 1
+                    size += (text.stamp or (0, 0))[0]
                     self.messages.put(("text_done", (media.path, text)))
             except Exception:
                 self._post(traceback.format_exc(), "error")
             finally:
+                if read:
+                    self._post(f"preview: read the subtitles of {read} file(s), "
+                               f"{size / 1e9:.1f} GB, in {time.time() - started:.0f} s\n",
+                               "dim")
                 self.messages.put(("text_scan_end", None))
 
         self.text_thread = threading.Thread(target=work, daemon=True)
@@ -1399,12 +1407,14 @@ class App:
                     f"{moment.bottom_rows} below")
         elif not self.vars["preview_worst"].get():
             text = "Sample text."
-        elif reading:
+        elif not self.videos:
+            text = "Sample text. Queue videos to preview the worst moment in them."
+        elif reading or self.scanning:
             text = "Sample text for now."
-        elif self.videos and self.texts:
+        elif self.texts:
             text = "Sample text: none of the queued files has text for these lines."
         else:
-            text = "Sample text. Queue videos to preview the worst moment in them."
+            text = "Sample text until the queued files have been read."
         self.preview_caption.set(text + (f"   ({reading})" if reading else ""))
 
     def run_or_stop(self) -> None:

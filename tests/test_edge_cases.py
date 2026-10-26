@@ -367,6 +367,19 @@ def test_the_worst_across_files_names_its_file():
     assert moment.video == Path("e2.mkv")
 
 
+def test_a_chatty_child_process_cannot_hang_a_cancellable_run():
+    # The background read waited for mkvextract without reading its output.
+    # Once that output filled the pipe (about 4 KB on Windows: a line per
+    # track plus a hundred progress updates), both sides waited forever.
+    import time
+    from dualsubs.tools import run_cancellable
+    deadline = time.time() + 20
+    code = "import sys; sys.stdout.write('x' * 1000000); sys.stderr.write('e' * 1000000)"
+    result = run_cancellable([sys.executable, "-c", code], lambda: time.time() > deadline)
+    assert result is not None, "hung until stopped"
+    assert len(result.stdout) == len(result.stderr) == 1000000
+
+
 def test_compact_keeps_dialogue_and_drops_placed_signs():
     events = [Event(50, 90, r"{\i1}Hello{\i0}\Nthere"),
               Event(0, 40, r"{\an8}SIGN"), Event(10, 20, r"{\b1}  ")]
